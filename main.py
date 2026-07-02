@@ -1,6 +1,6 @@
 """
-Hungarian Electronics Price Finder
-Searches 7 Hungarian electronics stores in parallel and shows results in a sortable table.
+Electronics Price Finder
+Searches Hungarian and EU electronics stores in parallel and shows results in a sortable table.
 """
 
 import threading
@@ -8,7 +8,8 @@ import webbrowser
 import tkinter as tk
 from tkinter import ttk
 
-from scrapers import SCRAPERS, create_session, extract_numeric_price, score_relevance
+from scrapers import (SCRAPERS, SCRAPER_REGIONS, create_session,
+                      extract_numeric_price, score_relevance, convert_eur_price)
 
 # ---------------------------------------------------------------------------
 # Colours & sizing constants
@@ -26,6 +27,26 @@ ROW_ALT  = "#f8f9fa"
 
 FONT_FAMILY = "Segoe UI"
 
+_REGION_OPTIONS = [
+    "All stores",
+    "Hungary (HU)",
+    "Germany (DE)",
+    "Italy (IT)",
+    "International (EU)",
+]
+
+
+def _filter_scrapers(region_label: str) -> list:
+    if region_label == "Hungary (HU)":
+        return [(n, r, f) for n, r, f in SCRAPERS if r == "hu"]
+    if region_label == "Germany (DE)":
+        return [(n, r, f) for n, r, f in SCRAPERS if r == "de"]
+    if region_label == "Italy (IT)":
+        return [(n, r, f) for n, r, f in SCRAPERS if r == "it"]
+    if region_label == "International (EU)":
+        return [(n, r, f) for n, r, f in SCRAPERS if r != "hu"]
+    return list(SCRAPERS)  # "All stores"
+
 
 # ---------------------------------------------------------------------------
 # Main application window
@@ -33,9 +54,9 @@ FONT_FAMILY = "Segoe UI"
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Hungarian Electronics Price Finder")
-        self.geometry("1280x780")
-        self.minsize(900, 600)
+        self.title("Electronics Price Finder")
+        self.geometry("1280x840")
+        self.minsize(900, 660)
         self.configure(bg=BG)
 
         self._session = create_session()
@@ -43,7 +64,7 @@ class App(tk.Tk):
         self._pending = 0
         self._lock = threading.Lock()
         self._current_query = ""
-        self._cache: dict[str, set[str]] = {}   # normalized query → URLs from last run
+        self._cache: dict[str, set[str]] = {}
         self._prev_urls: set[str] = set()
         self._cache_key = ""
 
@@ -115,6 +136,7 @@ class App(tk.Tk):
             ("Done",  "#dcfce7", "#166534"),
             ("None",  "#f1f5f9", "#64748b"),
             ("Error", "#fee2e2", "#991b1b"),
+            ("Skip",  "#e2e8f0", "#94a3b8"),   # not searched due to region filter
         ]:
             s.configure(f"Badge{key}.TLabel",
                         background=bg_col, foreground=fg_col,
@@ -129,7 +151,7 @@ class App(tk.Tk):
         hdr = ttk.Frame(self, padding=(24, 18, 24, 6))
         hdr.pack(fill="x")
         ttk.Label(hdr, text="Electronics Price Finder", style="Title.TLabel").pack(side="left")
-        ttk.Label(hdr, text=f"  Searches {len(SCRAPERS)} Hungarian stores simultaneously",
+        ttk.Label(hdr, text=f"  {len(SCRAPERS)} stores across Hungary and Europe",
                   style="Sub.TLabel").pack(side="left", pady=(6, 0))
 
         # ── Search bar ────────────────────────────────────────────────
@@ -146,25 +168,46 @@ class App(tk.Tk):
         self._entry.bind("<FocusOut>", self._on_entry_focus_out)
         self._entry.bind("<Return>",   lambda _e: self._start_search())
 
+        self._region_var = tk.StringVar(value="All stores")
+        self._region_combo = ttk.Combobox(
+            sf, textvariable=self._region_var,
+            values=_REGION_OPTIONS, state="readonly", width=18,
+        )
+        self._region_combo.pack(side="left", padx=(0, 10), ipady=3)
+
         self._search_btn = ttk.Button(sf, text="Search",
                                       command=self._start_search,
                                       style="Accent.TButton")
         self._search_btn.pack(side="left")
 
-        # ── Site-status badges (two rows) ─────────────────────────────
-        badge_frame = ttk.Frame(self, padding=(24, 2, 24, 6))
+        # ── Site-status badges ────────────────────────────────────────
+        badge_frame = ttk.Frame(self, padding=(24, 2, 24, 4))
         badge_frame.pack(fill="x")
 
         self._badges: dict[str, ttk.Label] = {}
-        sites = [name for name, _ in SCRAPERS]
-        mid = (len(sites) + 1) // 2
-        badge_row1 = ttk.Frame(badge_frame)
-        badge_row1.pack(fill="x")
-        badge_row2 = ttk.Frame(badge_frame)
-        badge_row2.pack(fill="x", pady=(3, 0))
-        for i, site_name in enumerate(sites):
-            row = badge_row1 if i < mid else badge_row2
+        hu_scrapers  = [(n, r, f) for n, r, f in SCRAPERS if r == "hu"]
+        int_scrapers = [(n, r, f) for n, r, f in SCRAPERS if r != "hu"]
+
+        # Hungarian stores — split across two rows
+        hu_mid = (len(hu_scrapers) + 1) // 2
+        ttk.Label(badge_frame, text="Hungary:", style="Sub.TLabel").pack(anchor="w")
+        hu_row1 = ttk.Frame(badge_frame)
+        hu_row1.pack(fill="x", pady=(1, 0))
+        hu_row2 = ttk.Frame(badge_frame)
+        hu_row2.pack(fill="x", pady=(3, 0))
+        for i, (site_name, _, _) in enumerate(hu_scrapers):
+            row = hu_row1 if i < hu_mid else hu_row2
             lbl = ttk.Label(row, text=f" {site_name} ", style="BadgeWait.TLabel")
+            lbl.pack(side="left", padx=(0, 6))
+            self._badges[site_name] = lbl
+
+        # International stores — single row
+        ttk.Label(badge_frame, text="International:", style="Sub.TLabel").pack(
+            anchor="w", pady=(6, 1))
+        int_row = ttk.Frame(badge_frame)
+        int_row.pack(fill="x")
+        for site_name, _, _ in int_scrapers:
+            lbl = ttk.Label(int_row, text=f" {site_name} ", style="BadgeWait.TLabel")
             lbl.pack(side="left", padx=(0, 6))
             self._badges[site_name] = lbl
 
@@ -213,9 +256,9 @@ class App(tk.Tk):
         self._tree.column("score", width=70,  minwidth=60,  stretch=False, anchor="center")
         self._tree.column("url",   width=0,   stretch=False)  # hidden; used for open
 
-        self._tree.tag_configure("score_high",     background="#dcfce7")   # green  ≥75
-        self._tree.tag_configure("score_mid",      background="#fef9c3")   # yellow 40-74
-        self._tree.tag_configure("score_low",      background="#fee2e2")   # pink   <40
+        self._tree.tag_configure("score_high",     background="#dcfce7")
+        self._tree.tag_configure("score_mid",      background="#fef9c3")
+        self._tree.tag_configure("score_low",      background="#fee2e2")
         self._tree.tag_configure("score_high_new", background="#bbf7d0", font=(FONT_FAMILY, 10, "bold"))
         self._tree.tag_configure("score_mid_new",  background="#fde68a", font=(FONT_FAMILY, 10, "bold"))
         self._tree.tag_configure("score_low_new",  background="#fca5a5", font=(FONT_FAMILY, 10, "bold"))
@@ -259,6 +302,9 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Search orchestration
     # ------------------------------------------------------------------
+    def _get_active_scrapers(self) -> list:
+        return _filter_scrapers(self._region_var.get())
+
     def _start_search(self):
         query = self._query_var.get().strip()
         if not query or query == self._PLACEHOLDER:
@@ -269,6 +315,13 @@ class App(tk.Tk):
         self._cache_key = query.lower().strip()
         self._prev_urls = self._cache.get(self._cache_key, set())
 
+        active = self._get_active_scrapers()
+        if not active:
+            self._status_var.set("No stores match the selected region.")
+            return
+
+        active_names = {name for name, _, _ in active}
+
         # Reset state
         self._all_results.clear()
         for iid in self._tree.get_children():
@@ -276,17 +329,17 @@ class App(tk.Tk):
         self._count_var.set("Searching…")
         self._search_btn.state(["disabled"])
 
-        for lbl in self._badges.values():
-            lbl.configure(text=f" {lbl.cget('text').strip()} ", style="BadgeLoad.TLabel")
-        # Re-set text without count suffix from prior run
         for site_name, lbl in self._badges.items():
-            lbl.configure(text=f" {site_name} ")
+            if site_name in active_names:
+                lbl.configure(text=f" {site_name} ", style="BadgeLoad.TLabel")
+            else:
+                lbl.configure(text=f" {site_name} ", style="BadgeSkip.TLabel")
 
         self._status_var.set(
-            f'Searching for "{query}" across {len(SCRAPERS)} stores…')
-        self._pending = len(SCRAPERS)
+            f'Searching for "{query}" across {len(active)} stores…')
+        self._pending = len(active)
 
-        for site_name, fn in SCRAPERS:
+        for site_name, _region, fn in active:
             threading.Thread(
                 target=self._worker,
                 args=(site_name, fn, query),
@@ -313,7 +366,10 @@ class App(tk.Tk):
                 self._badges[site_name].configure(
                     text=f" {site_name}: {suffix} ",
                     style=style)
+                is_intl = SCRAPER_REGIONS.get(site_name, "hu") != "hu"
                 for r in results:
+                    if is_intl:
+                        r["price"] = convert_eur_price(r["price"])
                     r["score"] = score_relevance(self._current_query, r["name"])
                     r["is_new"] = bool(self._prev_urls) and r.get("url", "") not in self._prev_urls
                 self._all_results.extend(results)

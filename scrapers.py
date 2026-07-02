@@ -11,9 +11,12 @@ Approach per site:
   Vatera.hu      - JavaScript-rendered; raises informative error
 """
 
+import io
 import re
 import json
 import html
+import threading
+import contextlib
 import urllib.parse
 
 import requests
@@ -48,14 +51,85 @@ def _check_response(r: requests.Response, site: str) -> None:
     if r.status_code == 511 or "captcha" in r.text[:500].lower():
         raise RuntimeError(f"{site}: CAPTCHA / WAF block — try again in a few minutes")
     if r.status_code == 403:
-        raise RuntimeError(f"{site}: 403 Forbidden")
+        raise RuntimeError(f"{site}: 403 Forbidden — bot detection active")
+    if r.status_code == 503:
+        raise RuntimeError(f"{site}: 503 — bot detection / temporary block")
     r.raise_for_status()
 
 
 def extract_numeric_price(price_str: str) -> int:
-    """Return an integer suitable for numeric sort (strips all non-digits)."""
-    digits = re.sub(r"[^\d]", "", price_str)
+    """Return an integer for numeric sort — uses only the HUF part before any '(' bracket."""
+    huf_part = price_str.split("(")[0]
+    digits = re.sub(r"[^\d]", "", huf_part)
     return int(digits) if digits else 0
+
+
+# ---------------------------------------------------------------------------
+# EUR → HUF conversion  (rate fetched once per session, cached)
+# ---------------------------------------------------------------------------
+_eur_huf_cache: list[float] = []   # holds at most one element
+_eur_huf_lock = threading.Lock()
+
+
+def _get_eur_huf_rate() -> float:
+    with _eur_huf_lock:
+        if _eur_huf_cache:
+            return _eur_huf_cache[0]
+        try:
+            r = requests.get(
+                "https://api.frankfurter.app/latest?from=EUR&to=HUF",
+                timeout=5,
+            )
+            _eur_huf_cache.append(float(r.json()["rates"]["HUF"]))
+        except Exception:
+            _eur_huf_cache.append(400.0)   # reasonable fallback
+        return _eur_huf_cache[0]
+
+
+def convert_eur_price(price_str: str) -> str:
+    """
+    Parse a price string in EUR and return "X XXX Ft (Y €)".
+
+    Handles all formats seen across EU stores:
+      "€ 2.049,00"   (German/Austrian: period=thousands, comma=decimal)
+      "1 299.00 EUR"  (ISO)
+      "1.399,-"      (Dutch: period=thousands, dash=.00)
+      "€ 1069,00"    (Austrian: comma=decimal only)
+
+    If the string already contains "Ft" or "HUF" it is returned unchanged
+    (e.g. Amazon showing HUF prices to Hungarian visitors).
+    """
+    if not price_str or price_str == "N/A":
+        return price_str
+    if "Ft" in price_str or "HUF" in price_str.upper():
+        return price_str
+
+    s = price_str.upper().replace("EUR", "").replace("€", "").strip()
+    s = s.replace(",-", "")   # Dutch "1.399,-" → "1.399"
+    s = re.sub(r"\s+", "", s) # remove all whitespace
+
+    if "." in s and "," in s:
+        # Both separators: European (. = thousands, , = decimal) → "2049.00"
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        # Comma only: decimal separator "1069,00" → "1069.00"
+        s = s.replace(",", ".")
+    elif "." in s:
+        parts = s.split(".")
+        if len(parts) == 2 and len(parts[1]) == 3:
+            # Period with 3-digit fraction → thousands separator "1399"
+            s = s.replace(".", "")
+
+    s = re.sub(r"[^\d.]", "", s)
+    try:
+        eur = float(s)
+    except (ValueError, TypeError):
+        return price_str   # unparseable: show as-is
+
+    huf = round(eur * _get_eur_huf_rate() / 10) * 10   # round to nearest 10 Ft
+    huf_str = f"{int(huf):,}".replace(",", " ") + " Ft"
+    eur_str = f"{int(round(eur)):,}".replace(",", " ") + " €"
+    return f"{huf_str} ({eur_str})"
 
 
 _DIACRITICS = str.maketrans(
@@ -597,22 +671,325 @@ def scrape_iking(query: str, session: requests.Session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Registry
+# Alternate.de
 # ---------------------------------------------------------------------------
-SCRAPERS: list[tuple[str, callable]] = [
-    ("Alza.hu",          scrape_alza),
-    ("eMAG.hu",          scrape_emag),
-    ("MediaMarkt.hu",    scrape_mediamarkt),
-    ("iStyle.hu",        scrape_istyle),
-    ("Jófogás.hu",       scrape_jofogas),
-    ("Hardverapró",      scrape_hardverapro),
-    ("Vatera.hu",        scrape_vatera),
-    ("hasznaltalma.hu",  scrape_hasznaltalma),
-    ("iSamurai.hu",      scrape_isamurai),
-    ("macszerez.com",    scrape_macszerez),
-    ("Rejoy.hu",         scrape_rejoy),
-    ("iCrew.hu",         scrape_icrew),
-    ("almapiac.com",     scrape_almapiac),
-    ("Furbify.hu",       scrape_furbify),
-    ("iKing.hu",         scrape_iking),
+def scrape_alternate_de(query: str, _session) -> list[dict]:
+    """
+    Alternate.de — correct search URL is /listing.xhtml?q=.
+    Each product card is an <a class='productBox'> that is also the link.
+    Name in div.product-name (already includes brand); price in span.price.
+    No JSON-LD on listing pages — pure HTML parsing.
+    """
+    cs = cloudscraper.create_scraper()
+    url = f"https://www.alternate.de/listing.xhtml?q={urllib.parse.quote_plus(query)}"
+    r = cs.get(url, timeout=20)
+    _check_response(r, "Alternate.de")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for card in soup.select("a.productBox"):
+        href = card.get("href", "")
+        name_el = card.select_one("div.product-name")
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        price_el = card.select_one("span.price")
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+        results.append({"site": "Alternate.de", "name": name, "price": price, "url": href})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Amazon  (uses amzpy — curl_cffi browser impersonation, much better bypass)
+# ---------------------------------------------------------------------------
+def _scrape_amzpy(query: str, country_code: str, site_name: str) -> list[dict]:
+    """
+    Uses the amzpy library (curl_cffi-based browser impersonation) which handles
+    Amazon's bot detection far better than plain requests/cloudscraper.
+
+    Amazon may show prices in HUF to Hungarian visitors — those are passed through
+    as-is; EUR prices are left in raw form for convert_eur_price() in main.py.
+    """
+    from amzpy import AmazonScraper
+
+    # amzpy prints verbose progress lines — suppress them
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        scraper = AmazonScraper(country_code=country_code)
+        raw = scraper.search_products(query=query, max_pages=1)
+
+    results = []
+    seen: set[str] = set()
+    for r in raw:
+        title = (r.get("title") or "").strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+
+        price_val = r.get("price")
+        currency = str(r.get("currency") or "").strip().upper()
+
+        if price_val is not None and price_val != "?":
+            try:
+                val = float(price_val)
+                if currency in ("HUF", "FT"):
+                    # Amazon returning HUF prices (Hungarian visitor IP)
+                    price = f"{int(round(val)):,} Ft".replace(",", " ")
+                else:
+                    # EUR (or unknown) — convert_eur_price() in main.py will handle it
+                    price = f"{val:.2f} {currency or 'EUR'}"
+            except (ValueError, TypeError):
+                price = "N/A"
+        else:
+            price = "N/A"
+
+        url = r.get("url", "")
+        results.append({"site": site_name, "name": title, "price": price, "url": url})
+
+    return results[:20]
+
+
+def scrape_amazon_de(query: str, _session) -> list[dict]:
+    return _scrape_amzpy(query, "de", "Amazon.de")
+
+
+def scrape_amazon_it(query: str, _session) -> list[dict]:
+    return _scrape_amzpy(query, "it", "Amazon.it")
+
+
+# ---------------------------------------------------------------------------
+# MediaMarkt.de  (same Next.js / JSON-LD platform as MediaMarkt.hu)
+# ---------------------------------------------------------------------------
+def scrape_mediamarkt_de(query: str, _session) -> list[dict]:
+    """MediaMarkt Germany — same platform as .hu, prices in EUR."""
+    cs = cloudscraper.create_scraper()
+    url = f"https://www.mediamarkt.de/de/search.html?query={urllib.parse.quote(query)}"
+    r = cs.get(url, timeout=20)
+    _check_response(r, "MediaMarkt.de")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    for sc in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(sc.string or "")
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if data.get("@type") != "ItemList":
+            continue
+        for entry in data.get("itemListElement", []):
+            product = entry.get("item", {})
+            name = product.get("name", "").strip()
+            if not name:
+                continue
+            offers = product.get("offers", {})
+            price_val = offers.get("price") or offers.get("lowPrice")
+            currency = offers.get("priceCurrency", "EUR")
+            price = f"{float(price_val):.2f} {currency}" if price_val else "N/A"
+            product_url = product.get("url", "")
+            results.append({"site": "MediaMarkt.de", "name": name, "price": price, "url": product_url})
+        if results:
+            break
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Geizhals.at  (DACH price comparison — .de blocks server IPs, .at works)
+# ---------------------------------------------------------------------------
+def scrape_geizhals(query: str, _session) -> list[dict]:
+    """
+    Geizhals is the leading DACH price comparison site.
+    Uses the .at domain because geizhals.de returns 403 from non-residential IPs.
+    Default gallery view; selectors: .galleryview__item / .galleryview__name-link /
+    .galleryview__price-link.
+    """
+    cs = cloudscraper.create_scraper()
+    url = f"https://geizhals.at/?fs={urllib.parse.quote_plus(query)}"
+    r = cs.get(url, timeout=20)
+    _check_response(r, "Geizhals.at")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for item in soup.select(".galleryview__item"):
+        name_el = item.select_one(".galleryview__name-link")
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        href = name_el.get("href", "")
+        url_p = f"https://geizhals.at{href}" if href.startswith("/") else href
+        price_el = item.select_one(".galleryview__price-link, .galleryview__price, .price")
+        raw_price = _clean(price_el.get_text()) if price_el else "N/A"
+        # Remove "ab " (German "from") prefix shown on comparison prices
+        price = re.sub(r"^ab\s+", "", raw_price)
+        results.append({"site": "Geizhals.at", "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Mindfactory.de
+# ---------------------------------------------------------------------------
+def scrape_mindfactory(query: str, _session) -> list[dict]:
+    """
+    Mindfactory.de uses a category-hierarchy URL structure (no keyword search
+    endpoint) and active Cloudflare IUAM — visit mindfactory.de directly.
+    """
+    raise RuntimeError(
+        "Mindfactory.de: no keyword search endpoint and Cloudflare blocks "
+        "automated access — visit mindfactory.de directly"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coolblue  (NL/DE/BE electronics retailer)
+# ---------------------------------------------------------------------------
+def _coolblue_from_itemlist(soup: BeautifulSoup) -> list[dict]:
+    """Extract products from a JSON-LD ItemList (category/model pages)."""
+    results = []
+    for sc in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(sc.string or "")
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if data.get("@type") != "ItemList":
+            continue
+        for entry in data.get("itemListElement", []):
+            product = entry.get("item", entry)
+            name = product.get("name", "").strip()
+            if not name:
+                continue
+            offers = product.get("offers", {})
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+            price_val = offers.get("price") or offers.get("lowPrice")
+            currency = offers.get("priceCurrency", "EUR")
+            price = f"{float(price_val):.2f} {currency}" if price_val else "N/A"
+            url_p = product.get("url", "")
+            results.append({"site": "Coolblue", "name": name, "price": price, "url": url_p})
+        if results:
+            break
+    return results
+
+
+def _coolblue_from_cards(soup: BeautifulSoup) -> list[dict]:
+    """Extract products from HTML product cards on a search-results page."""
+    results = []
+    seen: set[str] = set()
+    for card in soup.select("div.product-card__details"):
+        link_el = card.select_one("a.link[href], a[href*='/product/']")
+        if not link_el:
+            continue
+        name = _clean(link_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        href = link_el.get("href", "")
+        url_p = f"https://www.coolblue.nl{href}" if href.startswith("/") else href
+        price_el = card.select_one("strong.sales-price__current")
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+        results.append({"site": "Coolblue", "name": name, "price": price, "url": url_p})
+    return results
+
+
+def scrape_coolblue(query: str, _session) -> list[dict]:
+    """
+    Coolblue (NL/DE/BE). Uses coolblue.nl/zoeken which may redirect to either
+    a search-results page (HTML cards) or a category/model page (JSON-LD ItemList).
+    If the landing page is a category hub with no products, follows model-specific
+    subcategory links to find listings.
+    """
+    cs = cloudscraper.create_scraper()
+    r = cs.get(
+        f"https://www.coolblue.nl/zoeken?query={urllib.parse.quote_plus(query)}",
+        timeout=20, allow_redirects=True,
+    )
+    _check_response(r, "Coolblue")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    # 1. JSON-LD ItemList (model-specific category pages)
+    results = _coolblue_from_itemlist(soup)
+    if results:
+        return results[:20]
+
+    # 2. HTML product cards (generic search-results page)
+    results = _coolblue_from_cards(soup)
+    if results:
+        return results[:20]
+
+    # 3. Category landing page — find sibling model pages that have listings.
+    # Model pages share the parent path and extend the base category name:
+    # e.g., base = ".../apple-macbook-air" → siblings = ".../apple-macbook-air-m4"
+    # Strip query string (e.g., ?redirect=...) before path analysis.
+    parsed_url = urllib.parse.urlparse(r.url)
+    clean_path = parsed_url.scheme + "://" + parsed_url.netloc + parsed_url.path.rstrip("/")
+    base_name = clean_path.split("/")[-1]
+    parent = "/".join(clean_path.split("/")[:-1])
+    seen_sub: set[str] = {clean_path}
+    sub_urls: list[str] = []
+    for a in soup.find_all("a", href=re.compile(r"coolblue\.nl/")):
+        href = a["href"].rstrip("/")
+        href_name = href.split("/")[-1]
+        if (href.startswith(parent + "/")
+                and href_name.startswith(base_name)
+                and len(href_name) > len(base_name)
+                and href not in seen_sub):
+            seen_sub.add(href)
+            sub_urls.append(href)
+
+    seen_names: set[str] = set()
+    for sub_url in sub_urls[:4]:
+        r2 = cs.get(sub_url, timeout=20)
+        if r2.status_code != 200:
+            continue
+        soup2 = BeautifulSoup(r2.text, "lxml")
+        items = _coolblue_from_itemlist(soup2) or _coolblue_from_cards(soup2)
+        for item in items:
+            if item["name"] not in seen_names:
+                seen_names.add(item["name"])
+                results.append(item)
+        if len(results) >= 20:
+            break
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Registry  — (site_name, region, scrape_fn)
+# ---------------------------------------------------------------------------
+SCRAPERS: list[tuple[str, str, callable]] = [
+    # ── Hungary ──────────────────────────────────────────────────────────────
+    ("Alza.hu",          "hu", scrape_alza),
+    ("eMAG.hu",          "hu", scrape_emag),
+    ("MediaMarkt.hu",    "hu", scrape_mediamarkt),
+    ("iStyle.hu",        "hu", scrape_istyle),
+    ("Jófogás.hu",       "hu", scrape_jofogas),
+    ("Hardverapró",      "hu", scrape_hardverapro),
+    ("Vatera.hu",        "hu", scrape_vatera),
+    ("hasznaltalma.hu",  "hu", scrape_hasznaltalma),
+    ("iSamurai.hu",      "hu", scrape_isamurai),
+    ("macszerez.com",    "hu", scrape_macszerez),
+    ("Rejoy.hu",         "hu", scrape_rejoy),
+    ("iCrew.hu",         "hu", scrape_icrew),
+    ("almapiac.com",     "hu", scrape_almapiac),
+    ("Furbify.hu",       "hu", scrape_furbify),
+    ("iKing.hu",         "hu", scrape_iking),
+    # ── Germany / DACH ───────────────────────────────────────────────────────
+    ("Alternate.de",     "de", scrape_alternate_de),
+    ("Amazon.de",        "de", scrape_amazon_de),
+    ("MediaMarkt.de",    "de", scrape_mediamarkt_de),
+    ("Geizhals.at",      "de", scrape_geizhals),
+    ("Coolblue",         "de", scrape_coolblue),
+    # ── Italy ────────────────────────────────────────────────────────────────
+    ("Amazon.it",        "it", scrape_amazon_it),
 ]
+
+# Lookup: site_name → region code  (used by main.py for EUR→HUF conversion)
+SCRAPER_REGIONS: dict[str, str] = {name: region for name, region, _ in SCRAPERS}
