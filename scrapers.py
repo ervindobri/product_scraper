@@ -9,6 +9,7 @@ Approach per site:
   Jófogás.hu     - requests + .reListItem (classifieds)
   Hardverapró    - requests + li.media/.uad-col-title (classifieds)
   Vatera.hu      - JavaScript-rendered; raises informative error
+  Kleinanzeigen.de - requests + article.aditem (classifieds)
 """
 
 import io
@@ -962,6 +963,100 @@ def scrape_coolblue(query: str, _session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Marktplaats.nl  (Dutch classifieds — Adevinta/eBay Classifieds Group)
+# ---------------------------------------------------------------------------
+_MARKTPLAATS_PRICE_LABELS = {
+    "FREE": "Gratis",
+    "SEE_DESCRIPTION": "Zie omschrijving",
+    "ON_REQUEST": "Op aanvraag",
+    "NOTAPPLICABLE": "Bieden",
+    "FAST_BID": "Bieden",
+}
+
+
+def _marktplaats_price(price_info: dict) -> str:
+    cents = price_info.get("priceCents") or 0
+    if not cents:
+        label = _MARKTPLAATS_PRICE_LABELS.get(price_info.get("priceType", ""))
+        return label or "N/A"
+    return f"{cents / 100:.2f} EUR"
+
+
+def scrape_marktplaats(query: str, session: requests.Session) -> list[dict]:
+    """
+    Marktplaats.nl is a Next.js app. No login/CAPTCHA is required to search —
+    listings ship server-side rendered inside the __NEXT_DATA__ JSON blob at
+    pageProps.searchRequestAndResponse.listings (confirmed userDetails.isLoggedIn
+    is false on an anonymous request).
+    """
+    url = f"https://www.marktplaats.nl/q/{urllib.parse.quote_plus(query)}/"
+    r = session.get(url, timeout=15)
+    _check_response(r, "Marktplaats.nl")
+
+    m = re.search(
+        r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S
+    )
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    listings = (
+        data.get("props", {})
+        .get("pageProps", {})
+        .get("searchRequestAndResponse", {})
+        .get("listings", [])
+    )
+
+    results = []
+    for item in listings[:20]:
+        name = _clean(item.get("title", ""))
+        if not name:
+            continue
+        vip_url = item.get("vipUrl", "")
+        url_p = f"https://www.marktplaats.nl{vip_url}" if vip_url else ""
+        price = _marktplaats_price(item.get("priceInfo", {}))
+        results.append({"site": "Marktplaats.nl", "name": name, "price": price, "url": url_p})
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Kleinanzeigen.de  (German classifieds, formerly eBay Kleinanzeigen)
+# ---------------------------------------------------------------------------
+def scrape_kleinanzeigen(query: str, session: requests.Session) -> list[dict]:
+    """
+    Kleinanzeigen.de is Germany's main classifieds site. Results are server-side
+    rendered in article.aditem elements — no JSON blob needed. Many listings show
+    "VB" (Verhandlungsbasis / negotiable) appended to a price or in place of one.
+    """
+    url = f"https://www.kleinanzeigen.de/s-{urllib.parse.quote(query)}/k0"
+    r = session.get(url, timeout=15)
+    _check_response(r, "Kleinanzeigen.de")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    for item in soup.select("article.aditem"):
+        name_el = item.select_one("h2.text-module-begin a") or item.select_one("a.ellipsis")
+        price_el = item.select_one(".aditem-main--middle--price-shipping--price")
+
+        if not name_el:
+            continue
+
+        name = _clean(name_el.get_text())
+        href = item.get("data-href") or name_el.get("href", "")
+        url_p = f"https://www.kleinanzeigen.de{href}" if href.startswith("/") else href
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+
+        if name:
+            results.append({"site": "Kleinanzeigen.de", "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
 # Registry  — (site_name, region, scrape_fn)
 # ---------------------------------------------------------------------------
 SCRAPERS: list[tuple[str, str, callable]] = [
@@ -987,8 +1082,11 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("MediaMarkt.de",    "de", scrape_mediamarkt_de),
     ("Geizhals.at",      "de", scrape_geizhals),
     ("Coolblue",         "de", scrape_coolblue),
+    # ("Kleinanzeigen.de", "de", scrape_kleinanzeigen),
     # ── Italy ────────────────────────────────────────────────────────────────
     ("Amazon.it",        "it", scrape_amazon_it),
+    # ── Netherlands ──────────────────────────────────────────────────────────
+    ("Marktplaats.nl",   "nl", scrape_marktplaats),
 ]
 
 # Lookup: site_name → region code  (used by main.py for EUR→HUF conversion)
