@@ -8,8 +8,7 @@ import webbrowser
 import tkinter as tk
 from tkinter import ttk
 
-from scrapers import (SCRAPERS, SCRAPER_REGIONS, create_session,
-                      extract_numeric_price, score_relevance, convert_eur_price)
+from scraper.scrapers import SCRAPERS, create_session, enrich_result
 
 # ---------------------------------------------------------------------------
 # Colours & sizing constants
@@ -366,11 +365,8 @@ class App(tk.Tk):
                 self._badges[site_name].configure(
                     text=f" {site_name}: {suffix} ",
                     style=style)
-                is_intl = SCRAPER_REGIONS.get(site_name, "hu") != "hu"
                 for r in results:
-                    if is_intl:
-                        r["price"] = convert_eur_price(r["price"])
-                    r["score"] = score_relevance(self._current_query, r["name"])
+                    enrich_result(site_name, r, self._current_query)
                     r["is_new"] = bool(self._prev_urls) and r.get("url", "") not in self._prev_urls
                 self._all_results.extend(results)
 
@@ -402,13 +398,13 @@ class App(tk.Tk):
 
         if sort == "relevance":
             rows.sort(
-                key=lambda r: (r.get("is_new", False), r.get("score", 0), -extract_numeric_price(r["price"])),
+                key=lambda r: (r.get("is_new", False), r.get("score", 0), -r.get("amount_huf", 0)),
                 reverse=True,
             )
         elif sort == "price_asc":
-            rows.sort(key=lambda r: extract_numeric_price(r["price"]))
+            rows.sort(key=lambda r: r.get("amount_huf", 0))
         elif sort == "price_desc":
-            rows.sort(key=lambda r: extract_numeric_price(r["price"]), reverse=True)
+            rows.sort(key=lambda r: r.get("amount_huf", 0), reverse=True)
         elif sort == "site":
             rows.sort(key=lambda r: r["site"])
         elif sort == "name":

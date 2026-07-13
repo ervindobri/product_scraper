@@ -10,15 +10,28 @@ Approach per site:
   Hardverapró    - requests + li.media/.uad-col-title (classifieds)
   Vatera.hu      - JavaScript-rendered; raises informative error
   Kleinanzeigen.de - requests + article.aditem (classifieds)
+  Alternate.de/.fr/.es - requests + a.productBox HTML cards
+  Coolblue.nl/.de - cloudscraper + HTML product cards, JSON-LD ItemList fallback
+  Morele.net     - requests + .cat-product HTML cards (Poland)
+  Compumsa.eu    - requests + ASP.NET GridView search results (Belgium)
+  Notebooksbilliger.de - Akamai Bot Manager blocks all pages; raises informative error
+  LDLC.com       - requests + server-rendered li.pdt-item search cards
+  Azerty.nl      - Cloudflare managed challenge blocks all pages; raises informative error
+  Megekko.nl     - custom JS bot-challenge blocks all pages; raises informative error
+  Webhallen.se   - requests + JSON API (productdiscovery/search endpoint), prices in SEK
+  Coolmod.com    - requests + Doofinder JSON search API
+  BPM-Power.com  - requests to Doofinder JSON search API (site itself blocked by Cloudflare)
 """
 
 import io
 import re
 import json
 import html
+import time
 import threading
 import contextlib
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 
 import requests
 import cloudscraper
@@ -59,32 +72,74 @@ def _check_response(r: requests.Response, site: str) -> None:
 
 
 def extract_numeric_price(price_str: str) -> int:
-    """Return an integer for numeric sort — uses only the HUF part before any '(' bracket."""
+    """
+    Return an integer for numeric sort — uses only the part before any
+    '(' bracket, and only the FIRST number in it (some listings show
+    "829 990 Ft 774 990 Ft" — original + discounted price in one string).
+    A trailing 1-2 digit decimal fraction (",00" / ".50") is dropped.
+    """
     huf_part = price_str.split("(")[0]
-    digits = re.sub(r"[^\d]", "", huf_part)
+    m = re.search(r"\d[\d\s.,\xa0]*", huf_part)
+    if not m:
+        return 0
+    s = m.group(0).strip()
+    s = re.sub(r"[.,]\d{1,2}$", "", s)   # decimal fraction, not thousands
+    digits = re.sub(r"[^\d]", "", s)
     return int(digits) if digits else 0
 
 
 # ---------------------------------------------------------------------------
-# EUR → HUF conversion  (rate fetched once per session, cached)
+# FX → HUF conversion  (rates cached per currency with a TTL, so long-running
+# processes — like the Django server — don't serve stale rates forever)
 # ---------------------------------------------------------------------------
-_eur_huf_cache: list[float] = []   # holds at most one element
-_eur_huf_lock = threading.Lock()
+RATE_TTL_SECONDS = 24 * 3600
+_RATE_RETRY_SECONDS = 300   # how soon to retry after a failed fetch
+
+# used when the rate API is unreachable
+_FALLBACK_HUF_RATES = {"EUR": 400.0, "PLN": 95.0, "SEK": 36.0}
+
+_huf_rates: dict[str, tuple[float, float]] = {}   # currency -> (rate, fetched_at)
+_huf_rates_lock = threading.Lock()
+
+
+def get_huf_rate(currency: str) -> float:
+    """Return the <currency>→HUF rate, cached for RATE_TTL_SECONDS."""
+    currency = (currency or "HUF").upper()
+    if currency == "HUF":
+        return 1.0
+    now = time.monotonic()
+    with _huf_rates_lock:
+        cached = _huf_rates.get(currency)
+        if cached and now - cached[1] < RATE_TTL_SECONDS:
+            return cached[0]
+        try:
+            r = requests.get(
+                f"https://api.frankfurter.app/latest?from={currency}&to=HUF",
+                timeout=5,
+            )
+            rate = float(r.json()["rates"]["HUF"])
+            _huf_rates[currency] = (rate, now)
+        except Exception:
+            rate = _FALLBACK_HUF_RATES.get(currency, 1.0)
+            # cache the fallback only briefly so a live rate is retried soon
+            _huf_rates[currency] = (rate, now - RATE_TTL_SECONDS + _RATE_RETRY_SECONDS)
+        return rate
 
 
 def _get_eur_huf_rate() -> float:
-    with _eur_huf_lock:
-        if _eur_huf_cache:
-            return _eur_huf_cache[0]
-        try:
-            r = requests.get(
-                "https://api.frankfurter.app/latest?from=EUR&to=HUF",
-                timeout=5,
-            )
-            _eur_huf_cache.append(float(r.json()["rates"]["HUF"]))
-        except Exception:
-            _eur_huf_cache.append(400.0)   # reasonable fallback
-        return _eur_huf_cache[0]
+    return get_huf_rate("EUR")
+
+
+# one shared Cloudflare-solving session — creating it is expensive, so reuse
+_cloudscraper_cache: list = []   # holds at most one instance
+_cloudscraper_lock = threading.Lock()
+
+
+def get_cloudscraper():
+    with _cloudscraper_lock:
+        if not _cloudscraper_cache:
+            _cloudscraper_cache.append(cloudscraper.create_scraper())
+        return _cloudscraper_cache[0]
 
 
 def convert_eur_price(price_str: str) -> str:
@@ -163,7 +218,7 @@ def scrape_alza(query: str, _session) -> list[dict]:
     Alza is a React SPA protected by Cloudflare. The product list is server-side
     rendered inside a data-initialdata attribute as HTML-encoded JSON.
     """
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     url = f"https://www.alza.hu/search.htm?exps={urllib.parse.quote(query)}"
     r = cs.get(url, timeout=20)
     _check_response(r, "Alza.hu")
@@ -202,7 +257,7 @@ def scrape_alza(query: str, _session) -> list[dict]:
 # ---------------------------------------------------------------------------
 def scrape_emag(query: str, _session) -> list[dict]:
     """eMAG uses server-side rendered .card-v2 product cards."""
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     url = f"https://www.emag.hu/search/{urllib.parse.quote(query)}/c"
     r = cs.get(url, timeout=20)
     _check_response(r, "eMAG.hu")
@@ -232,7 +287,7 @@ def scrape_mediamarkt(query: str, _session) -> list[dict]:
     MediaMarkt is Cloudflare-protected and Next.js-based. Product data is
     embedded in application/ld+json scripts as an ItemList.
     """
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     url = f"https://www.mediamarkt.hu/hu/search.html?query={urllib.parse.quote(query)}"
     r = cs.get(url, timeout=20)
     _check_response(r, "MediaMarkt.hu")
@@ -681,7 +736,7 @@ def scrape_alternate_de(query: str, _session) -> list[dict]:
     Name in div.product-name (already includes brand); price in span.price.
     No JSON-LD on listing pages — pure HTML parsing.
     """
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     url = f"https://www.alternate.de/listing.xhtml?q={urllib.parse.quote_plus(query)}"
     r = cs.get(url, timeout=20)
     _check_response(r, "Alternate.de")
@@ -701,6 +756,172 @@ def scrape_alternate_de(query: str, _session) -> list[dict]:
         price_el = card.select_one("span.price")
         price = _clean(price_el.get_text()) if price_el else "N/A"
         results.append({"site": "Alternate.de", "name": name, "price": price, "url": href})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Notebooksbilliger.de (NBB)
+# ---------------------------------------------------------------------------
+def scrape_notebooksbilliger(query: str, _session) -> list[dict]:
+    """
+    Notebooksbilliger.de fronts every page — search results and product pages
+    alike — with an Akamai Bot Manager behavioral/sensor-data challenge
+    (ak_bmsc/_abck/bm_sz cookies); confirmed blocked identically via plain
+    requests, cloudscraper, and curl_cffi Chrome/Safari/Edge impersonation, so
+    this raises an informative error instead of silently returning nothing.
+    """
+    raise RuntimeError(
+        "Notebooksbilliger.de: every page is gated by an Akamai Bot Manager "
+        "JS/behavioral challenge that no HTTP client can solve — "
+        "visit notebooksbilliger.de directly"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Alternate.fr / Alternate.es — same platform/template as Alternate.de.
+# Plain requests works fine on these (no Cloudflare block encountered).
+# ---------------------------------------------------------------------------
+def scrape_alternate_fr(query: str, session: requests.Session) -> list[dict]:
+    """
+    Alternate.fr — same platform as Alternate.de (search URL /listing.xhtml?q=).
+    Each product card is an <a class='productBox'> that is also the link.
+    Name in div.product-name; price in span.price, shown in EUR (e.g. "€ 150,90").
+    No JSON-LD on listing pages — pure HTML parsing.
+    """
+    url = f"https://www.alternate.fr/listing.xhtml?q={urllib.parse.quote_plus(query)}"
+    r = session.get(url, timeout=20)
+    _check_response(r, "Alternate.fr")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for card in soup.select("a.productBox"):
+        href = card.get("href", "")
+        name_el = card.select_one("div.product-name")
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        price_el = card.select_one("span.price")
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+        results.append({"site": "Alternate.fr", "name": name, "price": price, "url": href})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# LDLC.com
+# ---------------------------------------------------------------------------
+def scrape_ldlc(query: str, session: requests.Session) -> list[dict]:
+    """LDLC.com — requests + server-rendered li.pdt-item search cards."""
+    url = f"https://www.ldlc.com/recherche/{urllib.parse.quote(query)}/"
+    r = session.get(url, timeout=20)
+    _check_response(r, "LDLC.com")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for item in soup.select("li.pdt-item"):
+        name_el = item.select_one("h3.title-3 a") or item.select_one(".pdt-desc a")
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+
+        href = name_el.get("href", "")
+        url_p = f"https://www.ldlc.com{href}" if href.startswith("/") else href
+
+        # Regular items: <div class="price"><div class="price">199€<sup>95</sup></div></div>
+        # Discounted items: <div class="price"><div class="old-price">..</div><div class="new-price">9€<sup>95</sup></div></div>
+        price_el = item.select_one(".price .new-price, .price .price")
+        price = "N/A"
+        if price_el:
+            sup = price_el.select_one("sup")
+            euros = _clean(price_el.get_text("|", strip=True).split("|")[0]).replace("€", "").strip()
+            cents = _clean(sup.get_text()) if sup else "00"
+            if euros:
+                price = f"{euros},{cents} €"
+
+        results.append({"site": "LDLC.com", "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+def scrape_alternate_es(query: str, session: requests.Session) -> list[dict]:
+    """
+    Alternate.es — same platform as Alternate.de (search URL /listing.xhtml?q=).
+    Each product card is an <a class='productBox'> that is also the link.
+    Name in div.product-name; price in span.price, shown in EUR (e.g. "€ 677,00").
+    No JSON-LD on listing pages — pure HTML parsing.
+    """
+    url = f"https://www.alternate.es/listing.xhtml?q={urllib.parse.quote_plus(query)}"
+    r = session.get(url, timeout=20)
+    _check_response(r, "Alternate.es")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for card in soup.select("a.productBox"):
+        href = card.get("href", "")
+        name_el = card.select_one("div.product-name")
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        price_el = card.select_one("span.price")
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+        results.append({"site": "Alternate.es", "name": name, "price": price, "url": href})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Coolmod.com  (Spanish PC-hardware/gaming e-commerce retailer)
+# ---------------------------------------------------------------------------
+def scrape_coolmod(query: str, session: requests.Session) -> list[dict]:
+    """Coolmod.com — requests + Doofinder JSON search API (Origin/Referer headers required)."""
+    hashid = "a5271756a99534c5e04f33f3f35edf93"
+    url = (
+        f"https://eu1-search.doofinder.com/6/{hashid}/_search"
+        f"?query={urllib.parse.quote(query)}&rpp=20"
+    )
+    r = session.get(
+        url,
+        headers={
+            "Origin": "https://www.coolmod.com",
+            "Referer": "https://www.coolmod.com/",
+            "Accept": "application/json",
+        },
+        timeout=15,
+    )
+    _check_response(r, "Coolmod.com")
+
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError("Coolmod.com: unexpected non-JSON response from search API")
+
+    # Doofinder falls back to fuzzy/typo-correction matches with low relevance
+    # instead of an empty result set for gibberish queries — treat those as "no results".
+    if data.get("query_name") == "fuzzy":
+        return []
+
+    results = []
+    for item in data.get("results", [])[:20]:
+        name = _clean(item.get("title", ""))
+        if not name:
+            continue
+        price_val = item.get("best_price") or item.get("sale_price") or item.get("price")
+        price = f"{float(price_val):.2f} EUR" if price_val is not None else "N/A"
+        url_p = item.get("link", "")
+        results.append({"site": "Coolmod.com", "name": name, "price": price, "url": url_p})
 
     return results[:20]
 
@@ -763,11 +984,60 @@ def scrape_amazon_it(query: str, _session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# BPM-Power.com  (Italian PC-hardware/electronics retailer, Torino)
+# ---------------------------------------------------------------------------
+def scrape_bpm_power(query: str, session: requests.Session) -> list[dict]:
+    """
+    BPM-Power.com's own pages are behind a Cloudflare Turnstile challenge that
+    blocks plain requests/cloudscraper entirely (even robots.txt). Its search
+    widget instead calls Doofinder's public search API directly from the
+    browser (eu1-search.doofinder.com) with a fixed hashid — that endpoint is
+    not Cloudflare-protected and returns full product JSON. Needs a Referer/
+    Origin header for Doofinder's site-authentication check. Doofinder falls
+    back to irrelevant "fuzzy" results for queries with no real match, so we
+    filter with score_relevance() to drop those.
+    """
+    headers = {
+        "Referer": "https://www.bpm-power.com/",
+        "Origin": "https://www.bpm-power.com",
+    }
+    params = {
+        "hashid": "80ac5cdda86276c9ec2ebd582de29aae",
+        "query": query,
+        "rpp": 20,
+    }
+    r = session.get(
+        "https://eu1-search.doofinder.com/5/search",
+        params=params, headers=headers, timeout=15,
+    )
+    _check_response(r, "BPM-Power.com")
+    try:
+        data = r.json()
+    except ValueError:
+        return []
+
+    results = []
+    for item in data.get("results", []):
+        name = _clean(item.get("title", "") or "")
+        if not name or score_relevance(query, name) == 0:
+            continue
+        price_val = item.get("price")
+        try:
+            price = f"{float(price_val):.2f} EUR" if price_val is not None else "N/A"
+        except (TypeError, ValueError):
+            price = "N/A"
+        url = item.get("link", "") or ""
+        results.append({"site": "BPM-Power.com", "name": name, "price": price, "url": url})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
 # MediaMarkt.de  (same Next.js / JSON-LD platform as MediaMarkt.hu)
 # ---------------------------------------------------------------------------
 def scrape_mediamarkt_de(query: str, _session) -> list[dict]:
     """MediaMarkt Germany — same platform as .hu, prices in EUR."""
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     url = f"https://www.mediamarkt.de/de/search.html?query={urllib.parse.quote(query)}"
     r = cs.get(url, timeout=20)
     _check_response(r, "MediaMarkt.de")
@@ -808,7 +1078,7 @@ def scrape_geizhals(query: str, _session) -> list[dict]:
     Default gallery view; selectors: .galleryview__item / .galleryview__name-link /
     .galleryview__price-link.
     """
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     url = f"https://geizhals.at/?fs={urllib.parse.quote_plus(query)}"
     r = cs.get(url, timeout=20)
     _check_response(r, "Geizhals.at")
@@ -852,7 +1122,7 @@ def scrape_mindfactory(query: str, _session) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Coolblue  (NL/DE/BE electronics retailer)
 # ---------------------------------------------------------------------------
-def _coolblue_from_itemlist(soup: BeautifulSoup) -> list[dict]:
+def _coolblue_from_itemlist(soup: BeautifulSoup, site: str = "Coolblue") -> list[dict]:
     """Extract products from a JSON-LD ItemList (category/model pages)."""
     results = []
     for sc in soup.find_all("script", type="application/ld+json"):
@@ -874,18 +1144,18 @@ def _coolblue_from_itemlist(soup: BeautifulSoup) -> list[dict]:
             currency = offers.get("priceCurrency", "EUR")
             price = f"{float(price_val):.2f} {currency}" if price_val else "N/A"
             url_p = product.get("url", "")
-            results.append({"site": "Coolblue", "name": name, "price": price, "url": url_p})
+            results.append({"site": site, "name": name, "price": price, "url": url_p})
         if results:
             break
     return results
 
 
-def _coolblue_from_cards(soup: BeautifulSoup) -> list[dict]:
+def _coolblue_from_cards(soup: BeautifulSoup, site: str = "Coolblue", base: str = "https://www.coolblue.nl") -> list[dict]:
     """Extract products from HTML product cards on a search-results page."""
     results = []
     seen: set[str] = set()
     for card in soup.select("div.product-card__details"):
-        link_el = card.select_one("a.link[href], a[href*='/product/']")
+        link_el = card.select_one("a.link[href], a[href*='/product/'], a[href*='/produkt/']")
         if not link_el:
             continue
         name = _clean(link_el.get_text())
@@ -893,35 +1163,35 @@ def _coolblue_from_cards(soup: BeautifulSoup) -> list[dict]:
             continue
         seen.add(name)
         href = link_el.get("href", "")
-        url_p = f"https://www.coolblue.nl{href}" if href.startswith("/") else href
+        url_p = f"{base}{href}" if href.startswith("/") else href
         price_el = card.select_one("strong.sales-price__current")
         price = _clean(price_el.get_text()) if price_el else "N/A"
-        results.append({"site": "Coolblue", "name": name, "price": price, "url": url_p})
+        results.append({"site": site, "name": name, "price": price, "url": url_p})
     return results
 
 
 def scrape_coolblue(query: str, _session) -> list[dict]:
     """
-    Coolblue (NL/DE/BE). Uses coolblue.nl/zoeken which may redirect to either
-    a search-results page (HTML cards) or a category/model page (JSON-LD ItemList).
-    If the landing page is a category hub with no products, follows model-specific
-    subcategory links to find listings.
+    Coolblue.nl (Dutch storefront). Uses coolblue.nl/zoeken which may redirect to
+    either a search-results page (HTML cards) or a category/model page (JSON-LD
+    ItemList). If the landing page is a category hub with no products, follows
+    model-specific subcategory links to find listings.
     """
-    cs = cloudscraper.create_scraper()
+    cs = get_cloudscraper()
     r = cs.get(
         f"https://www.coolblue.nl/zoeken?query={urllib.parse.quote_plus(query)}",
         timeout=20, allow_redirects=True,
     )
-    _check_response(r, "Coolblue")
+    _check_response(r, "Coolblue.nl")
     soup = BeautifulSoup(r.text, "lxml")
 
     # 1. JSON-LD ItemList (model-specific category pages)
-    results = _coolblue_from_itemlist(soup)
+    results = _coolblue_from_itemlist(soup, "Coolblue.nl")
     if results:
         return results[:20]
 
     # 2. HTML product cards (generic search-results page)
-    results = _coolblue_from_cards(soup)
+    results = _coolblue_from_cards(soup, "Coolblue.nl", "https://www.coolblue.nl")
     if results:
         return results[:20]
 
@@ -951,13 +1221,76 @@ def scrape_coolblue(query: str, _session) -> list[dict]:
         if r2.status_code != 200:
             continue
         soup2 = BeautifulSoup(r2.text, "lxml")
-        items = _coolblue_from_itemlist(soup2) or _coolblue_from_cards(soup2)
+        items = (_coolblue_from_itemlist(soup2, "Coolblue.nl")
+                 or _coolblue_from_cards(soup2, "Coolblue.nl", "https://www.coolblue.nl"))
         for item in items:
             if item["name"] not in seen_names:
                 seen_names.add(item["name"])
                 results.append(item)
         if len(results) >= 20:
             break
+
+    return results[:20]
+
+
+def scrape_coolblue_de(query: str, _session) -> list[dict]:
+    """
+    Coolblue.de (German storefront — same platform/template as coolblue.nl, just
+    localized). Search path is /suchen (not /zoeken). Product URLs use /produkt/
+    instead of /product/; same div.product-card__details / strong.sales-price__current
+    selectors. JSON-LD ItemList kept as a fallback for category/model pages.
+    """
+    cs = get_cloudscraper()
+    r = cs.get(
+        f"https://www.coolblue.de/suchen?query={urllib.parse.quote_plus(query)}",
+        timeout=20, allow_redirects=True,
+    )
+    _check_response(r, "Coolblue.de")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = _coolblue_from_itemlist(soup, "Coolblue.de")
+    if results:
+        return results[:20]
+
+    results = _coolblue_from_cards(soup, "Coolblue.de", "https://www.coolblue.de")
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Compumsa.eu  (Belgian computer-hardware e-shop, French, ASP.NET WebForms)
+# ---------------------------------------------------------------------------
+def scrape_compumsa(query: str, session: requests.Session) -> list[dict]:
+    """Compumsa.eu — requests + server-rendered ASP.NET GridView search results."""
+    url = f"https://www.compumsa.eu/search/{urllib.parse.quote(query)}"
+    r = session.get(url, timeout=15)
+    _check_response(r, "Compumsa.eu")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    table = soup.find("table", id="ContentPlaceHolderMain_GridViewSearch")
+    if not table:
+        return []
+
+    results = []
+    seen: set[str] = set()
+    for row in table.select("tr"):
+        name_el = row.select_one("td.text-left.text-grid a")
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        href = name_el.get("href", "")
+        url_p = f"https://www.compumsa.eu{href}" if href.startswith("/") else href
+
+        price = "N/A"
+        for td in row.select("td.text-right"):
+            txt = _clean(td.get_text())
+            if "€" in txt:
+                price = txt
+                break
+
+        results.append({"site": "Compumsa.eu", "name": name, "price": price, "url": url_p})
 
     return results[:20]
 
@@ -1024,6 +1357,111 @@ def scrape_marktplaats(query: str, session: requests.Session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Azerty.nl
+# ---------------------------------------------------------------------------
+def scrape_azerty(query: str, _session) -> list[dict]:
+    """
+    Azerty.nl sits entirely behind a Cloudflare "managed" (interactive/Turnstile)
+    challenge — every path, including /robots.txt, returns a "Just a moment..."
+    interstitial. Plain requests, cloudscraper, curl_cffi browser impersonation,
+    and even headless Chromium all get stuck on the challenge, so no keyword-
+    search response is ever reachable. Raises an informative error.
+    """
+    raise RuntimeError(
+        "Azerty.nl: entire site is behind an interactive Cloudflare challenge "
+        "(cType: 'managed') that blocks automated requests, cloudscraper, and "
+        "even headless-browser access — visit azerty.nl directly"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Megekko.nl
+# ---------------------------------------------------------------------------
+def scrape_megekko(query: str, _session) -> list[dict]:
+    """
+    Megekko.nl serves a custom JavaScript "checking your browser" puzzle
+    challenge (not Cloudflare IUAM) on every route, including the homepage —
+    confirmed with both plain requests and cloudscraper. No JSON-LD, __NEXT_DATA__,
+    or server-rendered HTML is reachable without passing it. Raises an
+    informative error so the badge clearly explains why.
+    """
+    raise RuntimeError(
+        "Megekko.nl: served behind a custom JS bot-challenge page — "
+        "visit megekko.nl directly in a browser"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Morele.net  (Poland)
+# ---------------------------------------------------------------------------
+def scrape_morele(query: str, session: requests.Session) -> list[dict]:
+    """Morele.net (Poland) — requests + server-rendered .cat-product cards."""
+    url = f"https://www.morele.net/wyszukiwarka/?q={urllib.parse.quote_plus(query)}"
+    r = session.get(url, timeout=15)
+    _check_response(r, "Morele.net")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for card in soup.select("div.cat-product"):
+        name = _clean(card.get("data-product-name", ""))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+
+        link_el = card.select_one("[data-link-href-param]")
+        href = link_el.get("data-link-href-param", "") if link_el else ""
+        url_p = f"https://www.morele.net{href}" if href.startswith("/") else href
+
+        price_el = card.select_one(".price-new")
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+
+        results.append({"site": "Morele.net", "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
+# Webhallen.se  (Swedish PC-hardware/electronics/gaming retailer)
+# ---------------------------------------------------------------------------
+def scrape_webhallen(query: str, session: requests.Session) -> list[dict]:
+    """Webhallen.se — requests + JSON API (productdiscovery/search endpoint)."""
+    url = f"https://www.webhallen.com/api/productdiscovery/search/{urllib.parse.quote(query)}"
+    r = session.get(url, timeout=15, headers={"Accept": "application/json"})
+    _check_response(r, "Webhallen.se")
+
+    try:
+        data = r.json()
+    except ValueError:
+        return []
+
+    results = []
+    for item in data.get("products", []):
+        pid = item.get("id")
+        name = _clean(item.get("name") or item.get("mainTitle") or "")
+        if not name or pid is None:
+            continue
+
+        # Prefer the current selling price; fall back to regular/lowest price.
+        price_info = item.get("price") or item.get("regularPrice") or item.get("lowestPrice") or {}
+        price_val = price_info.get("price")
+        currency = price_info.get("currency", "SEK")
+        if price_val:
+            try:
+                amount = int(round(float(price_val)))
+                price = f"{amount:,} {currency}".replace(",", " ")
+            except (TypeError, ValueError):
+                price = "N/A"
+        else:
+            price = "N/A"
+
+        product_url = f"https://www.webhallen.com/se/product/{pid}"
+        results.append({"site": "Webhallen.se", "name": name, "price": price, "url": product_url})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
 # Kleinanzeigen.de  (German classifieds, formerly eBay Kleinanzeigen)
 # ---------------------------------------------------------------------------
 def scrape_kleinanzeigen(query: str, session: requests.Session) -> list[dict]:
@@ -1081,13 +1519,116 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Amazon.de",        "de", scrape_amazon_de),
     ("MediaMarkt.de",    "de", scrape_mediamarkt_de),
     ("Geizhals.at",      "de", scrape_geizhals),
-    ("Coolblue",         "de", scrape_coolblue),
+    ("Coolblue.de",      "de", scrape_coolblue_de),
+    ("Notebooksbilliger.de", "de", scrape_notebooksbilliger),
     # ("Kleinanzeigen.de", "de", scrape_kleinanzeigen),
+    # ── France ───────────────────────────────────────────────────────────────
+    ("Alternate.fr",     "fr", scrape_alternate_fr),
+    ("LDLC.com",         "fr", scrape_ldlc),
+    # ── Spain ────────────────────────────────────────────────────────────────
+    ("Alternate.es",     "es", scrape_alternate_es),
+    ("Coolmod.com",      "es", scrape_coolmod),
+    # ── Belgium ──────────────────────────────────────────────────────────────
+    ("Compumsa.eu",      "be", scrape_compumsa),
     # ── Italy ────────────────────────────────────────────────────────────────
     ("Amazon.it",        "it", scrape_amazon_it),
+    ("BPM-Power.com",    "it", scrape_bpm_power),
     # ── Netherlands ──────────────────────────────────────────────────────────
     ("Marktplaats.nl",   "nl", scrape_marktplaats),
+    ("Coolblue.nl",      "nl", scrape_coolblue),
+    ("Azerty.nl",        "nl", scrape_azerty),
+    ("Megekko.nl",       "nl", scrape_megekko),
+    # ── Poland ───────────────────────────────────────────────────────────────
+    ("Morele.net",       "pl", scrape_morele),
+    # ── Sweden ───────────────────────────────────────────────────────────────
+    ("Webhallen.se",     "se", scrape_webhallen),
 ]
 
 # Lookup: site_name → region code  (used by main.py for EUR→HUF conversion)
 SCRAPER_REGIONS: dict[str, str] = {name: region for name, region, _ in SCRAPERS}
+
+# Region codes whose scrapers return prices in EUR — only these should go through
+# convert_eur_price(). "pl" (Morele.net, PLN) and "se" (Webhallen.se, SEK) are
+# non-hu but NOT EUR, so main.py must not run them through the EUR converter.
+EUR_REGIONS: frozenset[str] = frozenset({"de", "fr", "es", "it", "nl", "be"})
+
+# What currency a region's prices end up in AFTER enrich_result ran
+# (EUR prices are converted to HUF; PLN/SEK stay in their local currency).
+REGION_CURRENCIES: dict[str, str] = {"pl": "PLN", "se": "SEK"}
+
+
+# ---------------------------------------------------------------------------
+# Shared search pipeline (used by both the GUI and the Django server)
+# ---------------------------------------------------------------------------
+def enrich_result(site: str, result: dict, query: str) -> dict:
+    """
+    Post-process one raw scraper result IN PLACE:
+      - "price" of EUR stores converted to the "X XXX Ft (Y €)" display form
+      - "amount"     numeric price in "currency"
+      - "currency"   HUF / PLN / SEK (EUR is already converted to HUF)
+      - "amount_huf" price normalized to HUF for cross-currency comparison
+      - "score"      0-100 relevance against the query
+    """
+    region = SCRAPER_REGIONS.get(site, "hu")
+    price_str = result.get("price", "")
+    if region in EUR_REGIONS:
+        price_str = convert_eur_price(price_str)
+        result["price"] = price_str
+    amount = extract_numeric_price(price_str)
+    currency = REGION_CURRENCIES.get(region, "HUF")
+    result.setdefault("site", site)
+    result["amount"] = amount
+    result["currency"] = currency
+    result["amount_huf"] = round(amount * get_huf_rate(currency)) if amount else 0
+    result["score"] = score_relevance(query, result.get("name", ""))
+    return result
+
+
+def run_search(
+    query: str,
+    scrapers: list | None = None,
+    session: requests.Session | None = None,
+    timeout: float = 90,
+    on_store=None,
+) -> tuple[list[dict], list[str], dict[str, str]]:
+    """
+    Run scrapers concurrently for a query and enrich every result.
+
+    Returns (results, ok_sites, failed_sites) where failed_sites maps
+    site name → error string. A failing site never kills the search.
+    on_store(site_name, results, error) — if given — is called from the
+    calling thread as each store finishes.
+    """
+    scrapers = list(SCRAPERS if scrapers is None else scrapers)
+    session = session or create_session()
+
+    results: list[dict] = []
+    ok_sites: list[str] = []
+    failed_sites: dict[str, str] = {}
+
+    executor = ThreadPoolExecutor(max_workers=max(1, len(scrapers)))
+    futures = {executor.submit(fn, query, session): site for site, _, fn in scrapers}
+    try:
+        for future in as_completed(futures, timeout=timeout):
+            site = futures[future]
+            try:
+                site_results = future.result()
+            except Exception as exc:
+                failed_sites[site] = str(exc)
+                if on_store:
+                    on_store(site, [], str(exc))
+                continue
+            for r in site_results:
+                enrich_result(site, r, query)
+            ok_sites.append(site)
+            results.extend(site_results)
+            if on_store:
+                on_store(site, site_results, None)
+    except FuturesTimeout:
+        for future, site in futures.items():
+            if not future.done():
+                failed_sites[site] = f"timed out after {timeout}s"
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    return results, ok_sites, failed_sites

@@ -1,3 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Django
+db.sqlite3
+
+# Build artifacts
 build/
 dist/
 *.spec
+
+# Editors / OS
+.vscode/
+.DS_Store
+
+# Flutter (frontend/ has its own .gitignore for deeper paths)
+frontend/build/
+frontend/.dart_tool/
