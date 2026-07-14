@@ -46,8 +46,8 @@ class Product(models.Model):
     url = models.TextField(default="", blank=True)
     # price in `currency`; price_huf is normalized for cross-currency sorting
     price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    currency = models.CharField(max_length=8, default='HUF')
     price_huf = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    currency = models.CharField(max_length=8, default='HUF')
     # Match against self.query: 0-100%
     score = models.IntegerField(default=0)
     # listing lifetime: first_seen set once, last_seen bumped every refresh
@@ -69,7 +69,7 @@ class Product(models.Model):
         return self.name
 
     def score_passes(self):
-        return self.score > 50;
+        return self.score > 50
 
 
 class PriceHistory(models.Model):

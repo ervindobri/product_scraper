@@ -3,6 +3,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frontend/core/app/app.dart';
 import 'package:frontend/features/domain/models/product.dart';
+import 'package:frontend/features/domain/models/query.dart';
 import 'package:frontend/features/domain/repositories/product_repository.dart';
 import 'package:frontend/features/products/presentation/products_view.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -24,6 +25,12 @@ class FakeProductRepository implements IProductRepository {
         ),
       ],
     );
+  }
+
+  @override
+  Future<QueriesList?> lastQueries() {
+    // TODO: implement lastQueries
+    throw UnimplementedError();
   }
 }
 

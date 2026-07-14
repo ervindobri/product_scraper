@@ -2,10 +2,12 @@ import 'package:davi/davi.dart';
 import 'package:fluent_ui/fluent_ui.dart'
     hide FilledButton, Colors, SliderThemeData;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide IconButton, ButtonStyle;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:frontend/features/domain/models/product.dart';
+import 'package:frontend/features/domain/models/query.dart';
 import 'package:frontend/features/products/presentation/state/products_provider.dart';
+import 'package:frontend/features/products/presentation/widgets/last_queries_dialog.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import 'package:url_launcher/url_launcher_string.dart';
@@ -31,43 +33,80 @@ class ProductsView extends HookConsumerWidget {
     }
 
     return ScaffoldPage(
-      header: const PageHeader(title: Text('Search products')),
-      content: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          spacing: 12,
-          children: [
-            Row(
-              spacing: 8,
-              children: [
-                SizedBox(
-                  width: 360,
-                  child: TextBox(
-                    controller: controller,
-                    placeholder: 'Search products…',
-                    prefix: const Padding(
-                      padding: EdgeInsetsDirectional.only(start: 10),
-                      child: Icon(FluentIcons.search, size: 14),
-                    ),
-                    onSubmitted: (_) => search(),
+      content: Center(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    spacing: 12,
+                    children: [
+                      Row(
+                        spacing: 8,
+                        children: [
+                          SizedBox(
+                            width: 360,
+                            child: TextBox(
+                              controller: controller,
+                              placeholder: 'Search products…',
+                              prefix: const Padding(
+                                padding: EdgeInsetsDirectional.only(
+                                  start: 10,
+                                ),
+                                child: Icon(FluentIcons.search, size: 14),
+                              ),
+                              onSubmitted: (_) => search(),
+                            ),
+                          ),
+                          FilledButton(
+                            onPressed: search,
+                            child: const Text('Search'),
+                          ),
+                        ],
+                      ),
+                      Filters(
+                        minScore: minScore,
+                        priceRange: priceRange,
+                      ),
+                    ],
                   ),
-                ),
-                FilledButton(onPressed: search, child: const Text('Search')),
-              ],
-            ),
-            Filters(
-              minScore: minScore,
-              priceRange: priceRange,
-            ),
-            Expanded(
-              child: Products(
-                query: submittedQuery.value,
-                minScore: minScore.value,
-                priceRange: priceRange.value,
+                  IconButton(
+                    iconButtonMode: IconButtonMode.large,
+                    style: ButtonStyle(),
+                    icon: Icon(
+                      FluentIcons.history,
+                      size: 32,
+                    ),
+                    onPressed: () async {
+                      final selected = await showGeneralDialog<Query?>(
+                        context: context,
+                        barrierDismissible: true,
+                        barrierLabel: '',
+                        pageBuilder: (_, anim1, anim2) => LastQueriesDialog(),
+                      );
+
+                      if (selected != null) {
+                        controller.text = selected.query;
+                        search();
+                      }
+                    },
+                  ),
+                ],
               ),
-            ),
-          ],
+              Expanded(
+                child: Products(
+                  query: submittedQuery.value,
+                  minScore: minScore.value,
+                  priceRange: priceRange.value,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -100,7 +139,9 @@ class Filters extends HookWidget {
         Row(
           spacing: 8,
           children: [
-            const SizedBox(width: 4,),
+            const SizedBox(
+              width: 4,
+            ),
             Material(
               color: Colors.transparent,
               child: Theme(
@@ -119,7 +160,6 @@ class Filters extends HookWidget {
                   children: [
                     RangeSlider(
                       min: 0,
-
                       divisions: 10000,
                       max: rangeMax,
                       values: range.value,
@@ -133,17 +173,20 @@ class Filters extends HookWidget {
                       child: DefaultTextStyle(
                         style: theme.typography.caption!.copyWith(
                           fontSize: 10,
-                          color: theme.typography.caption?.color?.withAlpha(128)
+                          color: theme.typography.caption?.color?.withAlpha(
+                            128,
+                          ),
                         ),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           spacing: 48,
                           children: [
-                          Text(range.value.start.format),
+                            Text(range.value.start.format),
                             Text(range.value.end.format),
-                        ],),
+                          ],
+                        ),
                       ),
-                    )
+                    ),
                   ],
                 ),
               ),
@@ -196,10 +239,21 @@ class Products extends ConsumerWidget {
             message: 'Nothing matched "$query". Try a different search.',
           );
         }
-        final items = (minScore == 0
-            ? list.items
-            : list.items.where((p) => p.score > minScore).toList()).where((p) => p.price >= priceRange.start && p.price < priceRange.end).toList();
-        return _ResultsTable(list: list, items: items, minScore: minScore, priceRange: priceRange,
+        final items =
+            (minScore == 0
+                    ? list.items
+                    : list.items.where((p) => p.score > minScore).toList())
+                .where(
+                  (p) =>
+                      p.priceHuf >= priceRange.start &&
+                      p.priceHuf < priceRange.end,
+                )
+                .toList();
+        return _ResultsTable(
+          list: list,
+          items: items,
+          minScore: minScore,
+          priceRange: priceRange,
         );
       },
       error: (error, _) => _CenteredState(
@@ -225,7 +279,7 @@ class _ResultsTable extends StatelessWidget {
     required this.list,
     required this.items,
     required this.minScore,
-    required this.priceRange
+    required this.priceRange,
   });
 
   final ProductList list;
@@ -242,6 +296,8 @@ class _ResultsTable extends StatelessWidget {
       color: res.textFillColorSecondary,
     );
 
+    final width = MediaQuery.sizeOf(context).width;
+    final tableWidth = (width > 1280 ? 1080 : width - 300) - 64;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       spacing: 8,
@@ -290,7 +346,7 @@ class _ResultsTable extends StatelessWidget {
               child: Davi<Product>(
                 onRowTap: (product) => launchUrlString(product.url),
                 DaviModel<Product>(
-                  rows: items,
+                  rows: items..sort((a, b) => a.priceHuf > b.priceHuf ? -1 : 1),
                   multiSortEnabled: true,
                   columns: [
                     DaviColumn(
@@ -299,7 +355,6 @@ class _ResultsTable extends StatelessWidget {
                       resizable: false,
                       sortable: false,
                       pinStatus: PinStatus.left,
-                      cellAlignment: Alignment.centerRight,
                       cellTextStyle: (params) => caption,
                       cellValue: (params) => params.rowIndex + 1,
                     ),
@@ -311,7 +366,7 @@ class _ResultsTable extends StatelessWidget {
                     ),
                     DaviColumn(
                       name: 'Product name',
-                      width: 480,
+                      width: tableWidth / 2.5 - 32,
                       grow: 1,
                       cellValue: (params) => params.data.name,
                     ),
