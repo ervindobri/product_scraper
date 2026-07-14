@@ -1,0 +1,9 @@
+frontend/
+.github/
+.git/
+**/__pycache__/
+**/*.pyc
+server/db.sqlite3
+server/staticfiles/
+.venv/
+venv/

@@ -8,3 +8,7 @@ amzpy>=1.0.0
 django>=6.0
 djangorestframework>=3.17
 django-cors-headers>=4.7
+
+# production serving (Docker image)
+gunicorn>=23.0
+whitenoise>=6.8

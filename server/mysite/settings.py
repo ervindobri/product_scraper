@@ -36,6 +36,19 @@ ALLOWED_HOSTS = [
     h for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if h
 ]
 
+# comma-separated origins, e.g. https://product-scraper.tailnet.ts.net
+# needed for admin/browsable-API logins when served over HTTPS
+CSRF_TRUSTED_ORIGINS = [
+    o for o in os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',') if o
+]
+
+if not DEBUG:
+    # in production the app sits behind tailscale serve (TLS termination),
+    # which forwards plain HTTP with X-Forwarded-Proto set
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
 
 # Application definition
 
@@ -53,6 +66,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # static files without a web server
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # must come before CommonMiddleware
     'django.middleware.common.CommonMiddleware',
@@ -88,7 +102,8 @@ WSGI_APPLICATION = 'mysite.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        # in Docker the DB lives on a mounted volume (DJANGO_DB_PATH=/data/db.sqlite3)
+        'NAME': os.environ.get('DJANGO_DB_PATH', BASE_DIR / 'db.sqlite3'),
     }
 }
 
@@ -128,6 +143,13 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # collectstatic target, served by whitenoise
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage',
+    },
+}
 
 
 # Django REST Framework
@@ -184,9 +206,10 @@ LOGGING = {
 # CORS (django-cors-headers)
 # https://github.com/adamchainz/django-cors-headers
 
+# comma-separated, e.g. DJANGO_CORS_ALLOWED_ORIGINS=https://product-scraper.tailnet.ts.net
+# (only needed for *web* frontends on a different origin; native apps skip CORS)
 CORS_ALLOWED_ORIGINS = [
-    # TODO: add the deployed frontend origin(s), e.g.
-    # "https://products.example.com",
+    o for o in os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', '').split(',') if o
 ]
 
 if DEBUG:

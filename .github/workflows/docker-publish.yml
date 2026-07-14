@@ -1,0 +1,41 @@
+name: Publish server image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - server/**
+      - scraper/**
+      - requirements.txt
+      - Dockerfile
+      - deploy/entrypoint.sh
+      - .github/workflows/docker-publish.yml
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/product-scraper:latest
+            ghcr.io/${{ github.repository_owner }}/product-scraper:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
