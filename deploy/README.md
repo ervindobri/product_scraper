@@ -44,22 +44,26 @@ docker build -t product-scraper:latest .
 1. Create the storage directories (as datasets or plain folders), e.g.
    `/mnt/<pool>/apps/product-scraper/ts-state` and
    `/mnt/<pool>/apps/product-scraper/data`.
-2. Open [truenas-app.yaml](truenas-app.yaml) and replace every `EDIT-ME`:
-   the auth key, your pool name, a fresh `DJANGO_SECRET_KEY`
-   (`openssl rand -base64 48`), and your tailnet name (the `xxx` in
-   `product-scraper.xxx.ts.net` — shown on the admin console DNS page).
-3. TrueNAS UI > **Apps > Discover > ⋮ > Install via YAML**, name it
+2. Put the secrets on the NAS — copy
+   [product-scraper.env.example](product-scraper.env.example) to
+   `/mnt/<pool>/apps/product-scraper/product-scraper.env`, fill in
+   `TS_AUTHKEY` (the **full** key, ID + secret half) and `DJANGO_SECRET_KEY`
+   (`openssl rand -base64 48`), then `chmod 600` it. The compose file loads
+   it via `env_file:`, so no secrets ever appear in the YAML or in git.
+3. Open [truenas-app.yaml](truenas-app.yaml) and adjust the non-secret
+   values if needed: pool name in the paths and your tailnet name (the `xxx`
+   in `product-scraper.xxx.ts.net` — shown on the admin console DNS page).
+4. TrueNAS UI > **Apps > Discover > ⋮ > Install via YAML**, name it
    `product-scraper`, paste the YAML, save.
-4. First start: the sidecar joins the tailnet, the API container runs
+5. First start: the sidecar joins the tailnet, the API container runs
    migrations and starts gunicorn. Check
    `https://product-scraper.<tailnet>.ts.net/api/` from any tailnet device.
 
-To create an admin user, use the container shell (TrueNAS app UI > Workloads >
-shell on `product-scraper-api`):
-
-```sh
-python manage.py createsuperuser
-```
+To create an admin user, set `DJANGO_SUPERUSER_USERNAME` / `_EMAIL` /
+`_PASSWORD` in the env file — the entrypoint runs
+`createsuperuser --noinput` on startup (a no-op once the account exists).
+With shell access you can instead run `python manage.py createsuperuser`
+in the `product-scraper-api` container.
 
 ## Updating
 

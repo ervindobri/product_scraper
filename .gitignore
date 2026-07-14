@@ -21,3 +21,7 @@ frontend/.dart_tool/
 
 # Django collectstatic output (rebuilt in the Docker image)
 server/staticfiles/
+
+# filled-in deployment secrets (only the .example template is tracked)
+deploy/*.env
+!deploy/*.env.example

@@ -1,12 +1,16 @@
 # Product scraper API as a TrueNAS custom app, reachable only over Tailscale.
 #
 # Install: TrueNAS UI > Apps > Discover > (three-dot menu) > Install via YAML,
-# name it "product-scraper" and paste this file. TrueNAS does not read .env
-# files here, so fill in the EDIT-ME values inline before pasting.
+# name it "product-scraper" and paste this file.
 #
-# Before first start, create the datasets (or plain dirs) used below, e.g.:
-#   /mnt/<pool>/apps/product-scraper/ts-state
-#   /mnt/<pool>/apps/product-scraper/data
+# Secrets (TS_AUTHKEY, DJANGO_SECRET_KEY) are NOT in this file — they load
+# from an env file on the NAS via `env_file:`. Before first start:
+#   1. create the dirs:
+#        /mnt/Main/apps/product-scraper/ts-state
+#        /mnt/Main/apps/product-scraper/data
+#   2. copy deploy/product-scraper.env.example to
+#        /mnt/Main/apps/product-scraper/product-scraper.env
+#      fill in the values, and: chmod 600 product-scraper.env
 #
 # The app is served at https://product-scraper.<tailnet>.ts.net — requires
 # MagicDNS + HTTPS certificates enabled in the Tailscale admin console.
@@ -32,8 +36,9 @@ services:
     image: tailscale/tailscale:latest
     container_name: product-scraper-ts
     hostname: product-scraper            # node name -> product-scraper.<tailnet>.ts.net
+    env_file:
+      - /mnt/Main/apps/product-scraper/product-scraper.env  # TS_AUTHKEY lives here
     environment:
-      - TS_AUTHKEY=tskey-auth-EDIT-ME    # https://login.tailscale.com/admin/settings/keys (use a tagged key)
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_SERVE_CONFIG=/config/serve.json
       - TS_USERSPACE=false
@@ -44,7 +49,7 @@ services:
       - source: ts-serve
         target: /config/serve.json
     volumes:
-      - /mnt/EDIT-ME/apps/product-scraper/ts-state:/var/lib/tailscale  # node identity must persist
+      - /mnt/Main/apps/product-scraper/ts-state:/var/lib/tailscale  # node identity must persist
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
@@ -61,15 +66,16 @@ services:
     image: ghcr.io/ervindobri/product-scraper:latest
     container_name: product-scraper-api
     network_mode: service:tailscale      # share the sidecar's network; not exposed on the LAN
+    env_file:
+      - /mnt/Main/apps/product-scraper/product-scraper.env  # DJANGO_SECRET_KEY lives here
     environment:
       - DJANGO_DEBUG=0
-      - DJANGO_SECRET_KEY=EDIT-ME        # e.g. `openssl rand -base64 48`
-      - DJANGO_ALLOWED_HOSTS=product-scraper.EDIT-ME.ts.net
-      - DJANGO_CSRF_TRUSTED_ORIGINS=https://product-scraper.EDIT-ME.ts.net
+      - DJANGO_ALLOWED_HOSTS=product-scraper.tail0b146d.ts.net
+      - DJANGO_CSRF_TRUSTED_ORIGINS=https://product-scraper.tail0b146d.ts.net
       # only needed once a web frontend runs on a *different* origin:
       # - DJANGO_CORS_ALLOWED_ORIGINS=https://frontend.EDIT-ME.ts.net
     volumes:
-      - /mnt/EDIT-ME/apps/product-scraper/data:/data   # sqlite database
+      - /mnt/Main/apps/product-scraper/data:/data   # sqlite database
     depends_on:
       tailscale:
         condition: service_healthy
