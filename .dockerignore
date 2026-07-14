@@ -1,4 +1,6 @@
 frontend/
+# ...except the compiled web bundle, which Dockerfile.web packages
+!frontend/build/web/
 .github/
 .git/
 **/__pycache__/

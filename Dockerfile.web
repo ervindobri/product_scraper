@@ -1,0 +1,7 @@
+# Flutter web frontend image. The web bundle is built OUTSIDE this Dockerfile
+# (CI runs `flutter build web --release` first) — this just packages it.
+# Build from the repo root: docker build -f Dockerfile.web -t product-scraper-web .
+FROM nginx:alpine
+
+COPY deploy/nginx-web.conf /etc/nginx/conf.d/default.conf
+COPY frontend/build/web/ /usr/share/nginx/html/

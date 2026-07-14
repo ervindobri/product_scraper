@@ -17,15 +17,22 @@
 
 configs:
   ts-serve:
-    # tailscale serve: terminate TLS on 443 and proxy to django (gunicorn :8000)
-    # inside the shared network namespace. AllowFunnel=false keeps it
-    # tailnet-only. Later the frontend can be added via path routing here.
+    # tailscale serve: terminate TLS on 443, then path-route inside the shared
+    # network namespace — flutter web (nginx :8080) at /, django (gunicorn
+    # :8000) under its own prefixes. Same origin, so no CORS anywhere.
+    # AllowFunnel=false keeps it tailnet-only.
     content: |
       {
         "TCP": {"443": {"HTTPS": true}},
         "Web": {
           "$${TS_CERT_DOMAIN}:443": {
-            "Handlers": {"/": {"Proxy": "http://127.0.0.1:8000"}}
+            "Handlers": {
+              "/api": {"Proxy": "http://127.0.0.1:8000"},
+              "/api-auth": {"Proxy": "http://127.0.0.1:8000"},
+              "/admin": {"Proxy": "http://127.0.0.1:8000"},
+              "/static": {"Proxy": "http://127.0.0.1:8000"},
+              "/": {"Proxy": "http://127.0.0.1:8080"}
+            }
           }
         },
         "AllowFunnel": {"$${TS_CERT_DOMAIN}:443": false}
@@ -76,6 +83,15 @@ services:
       # - DJANGO_CORS_ALLOWED_ORIGINS=https://frontend.EDIT-ME.ts.net
     volumes:
       - /mnt/Main/apps/product-scraper/data:/data   # sqlite database
+    depends_on:
+      tailscale:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/ervindobri/product-scraper-web:latest
+    container_name: product-scraper-web
+    network_mode: service:tailscale      # nginx on :8080 in the shared namespace
     depends_on:
       tailscale:
         condition: service_healthy

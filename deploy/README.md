@@ -67,28 +67,29 @@ in the `product-scraper-api` container.
 
 ## Updating
 
-Push to `main` (or rebuild on the NAS), then in the TrueNAS app UI hit
-**Update/Redeploy** to pull the new `:latest`. The SQLite DB and the Tailscale
-node identity live on the mounted datasets and survive redeploys.
+Push to `main` (or rebuild on the NAS), then in the TrueNAS app UI use
+**Upgrade** on the app — that's what pulls the new `:latest`. A plain
+restart/redeploy reuses the cached image and will NOT pick up changes.
+The SQLite DB and the Tailscale node identity live on the mounted datasets
+and survive upgrades.
 
-## Adding the frontend later
+## Frontend (Flutter web)
 
-Build the Flutter web app into a static-file container (nginx) in the same
-stack, also on `network_mode: service:tailscale` (listening on another port,
-e.g. 8080), and switch the serve config to path routing — same hostname, so no
-CORS at all:
+The `web` service serves the Flutter web build via nginx on :8080 in the same
+shared network namespace. The serve config path-routes: `/` goes to the
+frontend, `/api`, `/api-auth`, `/admin` and `/static` go to Django. Everything
+is one origin (`https://product-scraper.<tailnet>.ts.net`), so no CORS.
 
-```json
-"Handlers": {
-  "/api":    {"Proxy": "http://127.0.0.1:8000"},
-  "/admin":  {"Proxy": "http://127.0.0.1:8000"},
-  "/static": {"Proxy": "http://127.0.0.1:8000"},
-  "/":       {"Proxy": "http://127.0.0.1:8080"}
-}
-```
+`.github/workflows/web-publish.yml` builds the bundle (Flutter 3.35.6) and
+pushes `ghcr.io/ervindobri/product-scraper-web` on pushes to `main` touching
+`frontend/`. Like the API image, the GHCR package must be set to **Public**
+after the first push.
 
-(A native mobile app skips all of this — it just calls the ts.net URL
-directly.)
+The app calls the API at the relative `/api/` by default on web
+([dio_client.dart](../frontend/lib/core/network/dio_client.dart)); native
+desktop/mobile builds default to `http://127.0.0.1:8000/api/` and can be
+pointed elsewhere with
+`--dart-define=API_BASE_URL=https://product-scraper.<tailnet>.ts.net/api/`.
 
 ## Notes / gotchas
 
