@@ -20,6 +20,8 @@ configs:
     # tailscale serve: terminate TLS on 443, then path-route inside the shared
     # network namespace — flutter web (nginx :8080) at /, django (gunicorn
     # :8000) under its own prefixes. Same origin, so no CORS anywhere.
+    # NOTE: serve strips the mount path before proxying, so each django
+    # handler's proxy target must repeat the prefix.
     # AllowFunnel=false keeps it tailnet-only.
     content: |
       {
@@ -27,10 +29,10 @@ configs:
         "Web": {
           "$${TS_CERT_DOMAIN}:443": {
             "Handlers": {
-              "/api": {"Proxy": "http://127.0.0.1:8000"},
-              "/api-auth": {"Proxy": "http://127.0.0.1:8000"},
-              "/admin": {"Proxy": "http://127.0.0.1:8000"},
-              "/static": {"Proxy": "http://127.0.0.1:8000"},
+              "/api": {"Proxy": "http://127.0.0.1:8000/api"},
+              "/api-auth": {"Proxy": "http://127.0.0.1:8000/api-auth"},
+              "/admin": {"Proxy": "http://127.0.0.1:8000/admin"},
+              "/static": {"Proxy": "http://127.0.0.1:8000/static"},
               "/": {"Proxy": "http://127.0.0.1:8080"}
             }
           }

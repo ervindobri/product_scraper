@@ -3,6 +3,10 @@ set -e
 
 python manage.py migrate --noinput
 
+# seed/refresh Store rows from the scraper registry (idempotent) — search
+# silently returns nothing for stores missing from the DB
+python manage.py sync_stores
+
 # bootstrap an admin account on hosts without shell access (TrueNAS):
 # reads DJANGO_SUPERUSER_USERNAME / _EMAIL / _PASSWORD from the env file.
 # createsuperuser exits non-zero if the user already exists — that's fine.
