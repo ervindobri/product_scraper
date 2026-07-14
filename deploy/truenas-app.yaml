@@ -72,7 +72,11 @@ services:
     restart: unless-stopped
 
   api:
-    image: ghcr.io/ervindobri/product-scraper:latest
+    # pinned to a CI build (the workflow tags each image with the commit sha).
+    # To release: push, wait for Actions, replace the sha here and in the
+    # TrueNAS app config — saving force-pulls, unlike :latest which depends
+    # on TrueNAS noticing the digest change.
+    image: ghcr.io/ervindobri/product-scraper:6a194ac678466c0477f159a9ee96065d696b29cf
     container_name: product-scraper-api
     network_mode: service:tailscale      # share the sidecar's network; not exposed on the LAN
     env_file:

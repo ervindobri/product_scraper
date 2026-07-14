@@ -35,9 +35,7 @@ class FakeProductRepository implements IProductRepository {
 }
 
 void main() {
-  testWidgets('searching renders the results table', (
-    WidgetTester tester,
-  ) async {
+  Future<void> pumpApp(WidgetTester tester) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -49,8 +47,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+  }
 
-    expect(find.byType(NavigationView), findsOneWidget);
+  testWidgets('searching renders the results table', (
+    WidgetTester tester,
+  ) async {
+    await pumpApp(tester);
+
+    expect(find.byType(HomeShell), findsOneWidget);
     expect(find.byType(ProductsView), findsOneWidget);
     // nothing searched yet
     expect(find.text('Search across stores'), findsOneWidget);
@@ -60,5 +64,24 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(Davi<Product>), findsOneWidget);
+  });
+
+  testWidgets('phone width uses the card list instead of the table', (
+    WidgetTester tester,
+  ) async {
+    // iPhone-ish logical size; overflows throw in tests, so this also
+    // guards the compact layout against regressions
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await pumpApp(tester);
+
+    await tester.enterText(find.byType(TextBox), 'mac mini');
+    await tester.tap(find.text('Search'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Davi<Product>), findsNothing);
+    expect(find.text('Test product'), findsOneWidget);
   });
 }

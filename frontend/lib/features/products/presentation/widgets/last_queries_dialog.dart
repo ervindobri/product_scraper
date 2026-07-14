@@ -13,10 +13,8 @@ class LastQueriesDialog extends ConsumerWidget {
     final theme = FluentTheme.of(context);
     return ContentDialog(
       title: Text("Last queries"),
-      constraints: BoxConstraints(
-        maxWidth: 500,
-minWidth: 500,
-      ),
+      // cap at 500 but let the dialog shrink on phone-width screens
+      constraints: const BoxConstraints(maxWidth: 500),
       content: Material(
         color: Colors.transparent,
         child: ClipRRect(
@@ -36,7 +34,7 @@ minWidth: 500,
                       ),
                       DefaultTextStyle(
                         style: theme.typography.caption!.copyWith(
-                          color: theme.activeColor.withValues(alpha: 0.5)
+                          color: theme.activeColor.withValues(alpha: 0.5),
                         ),
                         child: Row(
                           children: [
@@ -53,18 +51,20 @@ minWidth: 500,
                             onTap: () {
                               Navigator.pop(context, e);
                             },
-        
+
                             child: Padding(
                               padding: const EdgeInsets.all(4.0),
                               child: Row(
                                 children: [
                                   Expanded(child: Text(e.query)),
-                                  Expanded(child: Text(e.resultCount.toString())),
+                                  Expanded(
+                                    child: Text(e.resultCount.toString()),
+                                  ),
                                   Expanded(
                                     child: Text(
                                       e.lastSearchedDate
                                           .toLocal()
-                                          .formatReadable
+                                          .formatReadable,
                                     ),
                                   ),
                                 ],
@@ -95,7 +95,7 @@ minWidth: 500,
 
 extension on DateTime {
   String get formatReadable {
-    final format =  DateFormat.yMMMMEEEEd();
+    final format = DateFormat.yMMMMEEEEd();
     return format.format(this);
   }
 }

@@ -67,11 +67,13 @@ in the `product-scraper-api` container.
 
 ## Updating
 
-Push to `main` (or rebuild on the NAS), then in the TrueNAS app UI use
-**Upgrade** on the app — that's what pulls the new `:latest`. A plain
-restart/redeploy reuses the cached image and will NOT pick up changes.
-The SQLite DB and the Tailscale node identity live on the mounted datasets
-and survive upgrades.
+Push to `main`, wait for the Actions build, then in the TrueNAS app UI
+**edit** the app and replace the image's commit-sha tag with the new commit's
+sha (the workflow tags every build with it) — saving force-pulls the image.
+This is deterministic; relying on `:latest` + the **Upgrade** button only
+works when TrueNAS's periodic check has already noticed the new digest, and
+a plain restart never re-pulls at all. The SQLite DB and the Tailscale node
+identity live on the mounted datasets and survive upgrades.
 
 ## Frontend (Flutter web)
 

@@ -21,6 +21,13 @@ class App extends ConsumerWidget {
   }
 }
 
+/// Below this width the app switches to the phone layout (stacked search
+/// header, result cards instead of the table).
+const kCompactBreakpoint = 700.0;
+
+bool isCompactLayout(BuildContext context) =>
+    MediaQuery.sizeOf(context).width < kCompactBreakpoint;
+
 class HomeShell extends HookConsumerWidget {
   const HomeShell({super.key});
 
@@ -28,57 +35,58 @@ class HomeShell extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = FluentTheme.of(context);
     final isDark = FluentTheme.of(context).brightness == Brightness.dark;
-    final width = MediaQuery.sizeOf(context).width;
+    final compact = isCompactLayout(context);
 
     return ScaffoldPage(
       padding: EdgeInsets.zero,
       header: Container(
         color: theme.scaffoldBackgroundColor,
-        width: width > 1280 ? 1080 : width - 300,
-        padding: const EdgeInsets.all(32.0),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(
-              spacing: 24,
+        alignment: Alignment.center,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1080),
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 12 : 32,
+              vertical: compact ? 12 : 32,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Icon(FluentIcons.product_catalog),
-                Text('Product Scanner', style: theme.typography.title),
+                Row(
+                  spacing: compact ? 12 : 24,
+                  children: [
+                    const Icon(FluentIcons.product_catalog),
+                    Text(
+                      'Product Scanner',
+                      style: compact
+                          ? theme.typography.subtitle
+                          : theme.typography.title,
+                    ),
+                  ],
+                ),
+                Tooltip(
+                  message: isDark
+                      ? 'Switch to light theme'
+                      : 'Switch to dark theme',
+                  child: IconButton(
+                    icon: Icon(
+                      isDark ? FluentIcons.sunny : FluentIcons.clear_night,
+                    ),
+                    onPressed: () =>
+                        ref.read(themeModeProvider.notifier).toggle(),
+                  ),
+                ),
               ],
             ),
-            Padding(
-              padding: const EdgeInsetsDirectional.only(
-                start: 24,
-                end: 8,
-              ),
-              child: Tooltip(
-                message: isDark
-                    ? 'Switch to light theme'
-                    : 'Switch to dark theme',
-                child: IconButton(
-                  icon: Icon(
-                    isDark ? FluentIcons.sunny : FluentIcons.clear_night,
-                  ),
-                  onPressed: () =>
-                      ref.read(themeModeProvider.notifier).toggle(),
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
       content: Container(
-        decoration: BoxDecoration(
-          color: theme.scaffoldBackgroundColor,
-        ),
-        width: width > 1280 ? 1080 : width - 300,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Expanded(
-              child: const ProductsView(),
-            ),
-          ],
+        color: theme.scaffoldBackgroundColor,
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1080),
+          child: const ProductsView(),
         ),
       ),
     );
