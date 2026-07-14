@@ -95,7 +95,9 @@ services:
     restart: unless-stopped
 
   web:
-    image: ghcr.io/ervindobri/product-scraper-web:latest
+    # pinned like the api image — use the FULL 40-char commit sha of a
+    # successful "Publish web image" run (short shas are not tagged)
+    image: ghcr.io/ervindobri/product-scraper-web:f857332f0f618a98640c00a9924315ea13942da6
     container_name: product-scraper-web
     network_mode: service:tailscale      # nginx on :8080 in the shared namespace
     depends_on:
