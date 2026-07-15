@@ -8,7 +8,7 @@ import webbrowser
 import tkinter as tk
 from tkinter import ttk
 
-from scraper.scrapers import SCRAPERS, create_session, enrich_result
+from scrapers import SCRAPERS, create_session, enrich_result
 
 # ---------------------------------------------------------------------------
 # Colours & sizing constants

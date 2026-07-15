@@ -2,15 +2,15 @@
 Per-site scraping logic.
 
 Approach per site:
-  Alza.hu        - cloudscraper (Cloudflare bypass) + parse data-initialdata JSON
-  eMAG.hu        - cloudscraper + HTML (.card-v2 structure)
+  Alza.hu/.cz/.de/.at/.sk - cloudscraper (Cloudflare bypass) + parse data-initialdata JSON
+  eMAG.hu/.ro    - cloudscraper + HTML (.card-v2 structure)
   MediaMarkt.hu  - cloudscraper + JSON-LD ItemList
   iStyle.hu      - requests + individual JSON-LD Product scripts
   Jófogás.hu     - requests + .reListItem (classifieds)
   Hardverapró    - requests + li.media/.uad-col-title (classifieds)
   Vatera.hu      - JavaScript-rendered; raises informative error
   Kleinanzeigen.de - requests + article.aditem (classifieds)
-  Alternate.de/.fr/.es - requests + a.productBox HTML cards
+  Alternate.de/.fr/.es/.nl/.at - requests + a.productBox HTML cards (.de via cloudscraper)
   Coolblue.nl/.de - cloudscraper + HTML product cards, JSON-LD ItemList fallback
   Morele.net     - requests + .cat-product HTML cards (Poland)
   Compumsa.eu    - requests + ASP.NET GridView search results (Belgium)
@@ -96,7 +96,7 @@ RATE_TTL_SECONDS = 24 * 3600
 _RATE_RETRY_SECONDS = 300   # how soon to retry after a failed fetch
 
 # used when the rate API is unreachable
-_FALLBACK_HUF_RATES = {"EUR": 400.0, "PLN": 95.0, "SEK": 36.0}
+_FALLBACK_HUF_RATES = {"EUR": 400.0, "PLN": 95.0, "SEK": 36.0, "CZK": 16.0, "RON": 80.0}
 
 _huf_rates: dict[str, tuple[float, float]] = {}   # currency -> (rate, fetched_at)
 _huf_rates_lock = threading.Lock()
@@ -211,17 +211,18 @@ def score_relevance(query: str, name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Alza.hu
+# Alza.hu / .cz / .de / .at / .sk — one platform, per-country domains
 # ---------------------------------------------------------------------------
-def scrape_alza(query: str, _session) -> list[dict]:
+def _scrape_alza_domain(site: str, domain: str, query: str) -> list[dict]:
     """
     Alza is a React SPA protected by Cloudflare. The product list is server-side
-    rendered inside a data-initialdata attribute as HTML-encoded JSON.
+    rendered inside a data-initialdata attribute as HTML-encoded JSON. Every
+    country domain uses the same template; item "currency" is native (HUF/CZK/EUR).
     """
     cs = get_cloudscraper()
-    url = f"https://www.alza.hu/search.htm?exps={urllib.parse.quote(query)}"
+    url = f"https://www.{domain}/search.htm?exps={urllib.parse.quote(query)}"
     r = cs.get(url, timeout=20)
-    _check_response(r, "Alza.hu")
+    _check_response(r, site)
 
     # Find all data-initialdata attributes that contain an "items" array
     matches = re.findall(r'data-initialdata="([^"]*&quot;items&quot;[^"]*)"', r.text)
@@ -247,20 +248,40 @@ def scrape_alza(query: str, _session) -> list[dict]:
             seen.add(name)
 
             price = f"{price_val:,} {currency}".replace(",", " ") if price_val else "N/A"
-            results.append({"site": "Alza.hu", "name": name, "price": price, "url": url_product})
+            results.append({"site": site, "name": name, "price": price, "url": url_product})
 
     return results
 
 
+def scrape_alza(query: str, _session) -> list[dict]:
+    return _scrape_alza_domain("Alza.hu", "alza.hu", query)
+
+
+def scrape_alza_cz(query: str, _session) -> list[dict]:
+    return _scrape_alza_domain("Alza.cz", "alza.cz", query)
+
+
+def scrape_alza_de(query: str, _session) -> list[dict]:
+    return _scrape_alza_domain("Alza.de", "alza.de", query)
+
+
+def scrape_alza_at(query: str, _session) -> list[dict]:
+    return _scrape_alza_domain("Alza.at", "alza.at", query)
+
+
+def scrape_alza_sk(query: str, _session) -> list[dict]:
+    return _scrape_alza_domain("Alza.sk", "alza.sk", query)
+
+
 # ---------------------------------------------------------------------------
-# eMAG.hu
+# eMAG.hu / .ro — one platform, per-country domains
 # ---------------------------------------------------------------------------
-def scrape_emag(query: str, _session) -> list[dict]:
-    """eMAG uses server-side rendered .card-v2 product cards."""
+def _scrape_emag_domain(site: str, domain: str, query: str) -> list[dict]:
+    """eMAG uses server-side rendered .card-v2 product cards on every domain."""
     cs = get_cloudscraper()
-    url = f"https://www.emag.hu/search/{urllib.parse.quote(query)}/c"
+    url = f"https://www.{domain}/search/{urllib.parse.quote(query)}/c"
     r = cs.get(url, timeout=20)
-    _check_response(r, "eMAG.hu")
+    _check_response(r, site)
     soup = BeautifulSoup(r.text, "lxml")
 
     results = []
@@ -274,9 +295,17 @@ def scrape_emag(query: str, _session) -> list[dict]:
         href = name_el.get("href", "")
         price = _clean(price_el.get_text()) if price_el else "N/A"
         if name:
-            results.append({"site": "eMAG.hu", "name": name, "price": price, "url": href})
+            results.append({"site": site, "name": name, "price": price, "url": href})
 
     return results[:20]
+
+
+def scrape_emag(query: str, _session) -> list[dict]:
+    return _scrape_emag_domain("eMAG.hu", "emag.hu", query)
+
+
+def scrape_emag_ro(query: str, _session) -> list[dict]:
+    return _scrape_emag_domain("eMAG.ro", "emag.ro", query)
 
 
 # ---------------------------------------------------------------------------
@@ -727,19 +756,18 @@ def scrape_iking(query: str, session: requests.Session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Alternate.de
+# Alternate.de / .fr / .es / .nl / .at — one platform, per-country domains
 # ---------------------------------------------------------------------------
-def scrape_alternate_de(query: str, _session) -> list[dict]:
+def _scrape_alternate_domain(site: str, domain: str, query: str, client) -> list[dict]:
     """
-    Alternate.de — correct search URL is /listing.xhtml?q=.
+    Alternate — correct search URL is /listing.xhtml?q= on every country domain.
     Each product card is an <a class='productBox'> that is also the link.
-    Name in div.product-name (already includes brand); price in span.price.
+    Name in div.product-name (already includes brand); price in span.price (EUR).
     No JSON-LD on listing pages — pure HTML parsing.
     """
-    cs = get_cloudscraper()
-    url = f"https://www.alternate.de/listing.xhtml?q={urllib.parse.quote_plus(query)}"
-    r = cs.get(url, timeout=20)
-    _check_response(r, "Alternate.de")
+    url = f"https://www.{domain}/listing.xhtml?q={urllib.parse.quote_plus(query)}"
+    r = client.get(url, timeout=20)
+    _check_response(r, site)
     soup = BeautifulSoup(r.text, "lxml")
 
     results = []
@@ -755,9 +783,14 @@ def scrape_alternate_de(query: str, _session) -> list[dict]:
         seen.add(name)
         price_el = card.select_one("span.price")
         price = _clean(price_el.get_text()) if price_el else "N/A"
-        results.append({"site": "Alternate.de", "name": name, "price": price, "url": href})
+        results.append({"site": site, "name": name, "price": price, "url": href})
 
     return results[:20]
+
+
+def scrape_alternate_de(query: str, _session) -> list[dict]:
+    # .de is Cloudflare-protected — needs cloudscraper; the others don't
+    return _scrape_alternate_domain("Alternate.de", "alternate.de", query, get_cloudscraper())
 
 
 # ---------------------------------------------------------------------------
@@ -779,37 +812,19 @@ def scrape_notebooksbilliger(query: str, _session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Alternate.fr / Alternate.es — same platform/template as Alternate.de.
+# Alternate.fr / .es / .nl / .at — same platform/template as Alternate.de.
 # Plain requests works fine on these (no Cloudflare block encountered).
 # ---------------------------------------------------------------------------
 def scrape_alternate_fr(query: str, session: requests.Session) -> list[dict]:
-    """
-    Alternate.fr — same platform as Alternate.de (search URL /listing.xhtml?q=).
-    Each product card is an <a class='productBox'> that is also the link.
-    Name in div.product-name; price in span.price, shown in EUR (e.g. "€ 150,90").
-    No JSON-LD on listing pages — pure HTML parsing.
-    """
-    url = f"https://www.alternate.fr/listing.xhtml?q={urllib.parse.quote_plus(query)}"
-    r = session.get(url, timeout=20)
-    _check_response(r, "Alternate.fr")
-    soup = BeautifulSoup(r.text, "lxml")
+    return _scrape_alternate_domain("Alternate.fr", "alternate.fr", query, session)
 
-    results = []
-    seen: set[str] = set()
-    for card in soup.select("a.productBox"):
-        href = card.get("href", "")
-        name_el = card.select_one("div.product-name")
-        if not name_el:
-            continue
-        name = _clean(name_el.get_text())
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        price_el = card.select_one("span.price")
-        price = _clean(price_el.get_text()) if price_el else "N/A"
-        results.append({"site": "Alternate.fr", "name": name, "price": price, "url": href})
 
-    return results[:20]
+def scrape_alternate_nl(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_alternate_domain("Alternate.nl", "alternate.nl", query, session)
+
+
+def scrape_alternate_at(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_alternate_domain("Alternate.at", "alternate.at", query, session)
 
 
 # ---------------------------------------------------------------------------
@@ -853,33 +868,7 @@ def scrape_ldlc(query: str, session: requests.Session) -> list[dict]:
 
 
 def scrape_alternate_es(query: str, session: requests.Session) -> list[dict]:
-    """
-    Alternate.es — same platform as Alternate.de (search URL /listing.xhtml?q=).
-    Each product card is an <a class='productBox'> that is also the link.
-    Name in div.product-name; price in span.price, shown in EUR (e.g. "€ 677,00").
-    No JSON-LD on listing pages — pure HTML parsing.
-    """
-    url = f"https://www.alternate.es/listing.xhtml?q={urllib.parse.quote_plus(query)}"
-    r = session.get(url, timeout=20)
-    _check_response(r, "Alternate.es")
-    soup = BeautifulSoup(r.text, "lxml")
-
-    results = []
-    seen: set[str] = set()
-    for card in soup.select("a.productBox"):
-        href = card.get("href", "")
-        name_el = card.select_one("div.product-name")
-        if not name_el:
-            continue
-        name = _clean(name_el.get_text())
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        price_el = card.select_one("span.price")
-        price = _clean(price_el.get_text()) if price_el else "N/A"
-        results.append({"site": "Alternate.es", "name": name, "price": price, "url": href})
-
-    return results[:20]
+    return _scrape_alternate_domain("Alternate.es", "alternate.es", query, session)
 
 
 # ---------------------------------------------------------------------------
@@ -1515,6 +1504,7 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Furbify.hu",       "hu", scrape_furbify),
     ("iKing.hu",         "hu", scrape_iking),
     # ── Germany / DACH ───────────────────────────────────────────────────────
+    ("Alza.de",          "de", scrape_alza_de),
     ("Alternate.de",     "de", scrape_alternate_de),
     ("Amazon.de",        "de", scrape_amazon_de),
     ("MediaMarkt.de",    "de", scrape_mediamarkt_de),
@@ -1522,6 +1512,15 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Coolblue.de",      "de", scrape_coolblue_de),
     ("Notebooksbilliger.de", "de", scrape_notebooksbilliger),
     # ("Kleinanzeigen.de", "de", scrape_kleinanzeigen),
+    # ── Austria ──────────────────────────────────────────────────────────────
+    ("Alza.at",          "at", scrape_alza_at),
+    ("Alternate.at",     "at", scrape_alternate_at),
+    # ── Czechia ──────────────────────────────────────────────────────────────
+    ("Alza.cz",          "cz", scrape_alza_cz),
+    # ── Slovakia ─────────────────────────────────────────────────────────────
+    ("Alza.sk",          "sk", scrape_alza_sk),
+    # ── Romania ──────────────────────────────────────────────────────────────
+    ("eMAG.ro",          "ro", scrape_emag_ro),
     # ── France ───────────────────────────────────────────────────────────────
     ("Alternate.fr",     "fr", scrape_alternate_fr),
     ("LDLC.com",         "fr", scrape_ldlc),
@@ -1534,6 +1533,7 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Amazon.it",        "it", scrape_amazon_it),
     ("BPM-Power.com",    "it", scrape_bpm_power),
     # ── Netherlands ──────────────────────────────────────────────────────────
+    ("Alternate.nl",     "nl", scrape_alternate_nl),
     ("Marktplaats.nl",   "nl", scrape_marktplaats),
     ("Coolblue.nl",      "nl", scrape_coolblue),
     ("Azerty.nl",        "nl", scrape_azerty),
@@ -1548,13 +1548,14 @@ SCRAPERS: list[tuple[str, str, callable]] = [
 SCRAPER_REGIONS: dict[str, str] = {name: region for name, region, _ in SCRAPERS}
 
 # Region codes whose scrapers return prices in EUR — only these should go through
-# convert_eur_price(). "pl" (Morele.net, PLN) and "se" (Webhallen.se, SEK) are
-# non-hu but NOT EUR, so main.py must not run them through the EUR converter.
-EUR_REGIONS: frozenset[str] = frozenset({"de", "fr", "es", "it", "nl", "be"})
+# convert_eur_price(). "pl" (Morele.net, PLN), "se" (Webhallen.se, SEK) and
+# "cz" (Alza.cz, CZK) are non-hu but NOT EUR, so main.py must not run them
+# through the EUR converter.
+EUR_REGIONS: frozenset[str] = frozenset({"de", "at", "sk", "fr", "es", "it", "nl", "be"})
 
 # What currency a region's prices end up in AFTER enrich_result ran
-# (EUR prices are converted to HUF; PLN/SEK stay in their local currency).
-REGION_CURRENCIES: dict[str, str] = {"pl": "PLN", "se": "SEK"}
+# (EUR prices are converted to HUF; PLN/SEK/CZK/RON stay in their local currency).
+REGION_CURRENCIES: dict[str, str] = {"pl": "PLN", "se": "SEK", "cz": "CZK", "ro": "RON"}
 
 
 # ---------------------------------------------------------------------------

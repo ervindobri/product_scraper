@@ -24,6 +24,10 @@ URL_OVERRIDES = {
 REGION_COUNTRIES = {
     "hu": "Hungary",
     "de": "Germany",
+    "at": "Austria",
+    "cz": "Czechia",
+    "sk": "Slovakia",
+    "ro": "Romania",
     "fr": "France",
     "es": "Spain",
     "be": "Belgium",
