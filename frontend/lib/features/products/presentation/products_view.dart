@@ -2,7 +2,7 @@ import 'package:davi/davi.dart';
 import 'package:fluent_ui/fluent_ui.dart'
     hide FilledButton, Colors, SliderThemeData;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart' hide IconButton, ButtonStyle;
+import 'package:flutter/material.dart' hide IconButton, ButtonStyle, Checkbox;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:frontend/core/app/app.dart';
 import 'package:frontend/features/domain/models/product.dart';
@@ -242,7 +242,7 @@ class Filters extends HookWidget {
   }
 }
 
-class Products extends ConsumerWidget {
+class Products extends HookConsumerWidget {
   const Products({
     super.key,
     required this.query,
@@ -256,6 +256,9 @@ class Products extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // null = no store filter applied (every store shown)
+    final selectedStores = useState<Set<String>?>(null);
+
     if (query.isEmpty) {
       return const _CenteredState(
         icon: FluentIcons.search_and_apps,
@@ -274,10 +277,17 @@ class Products extends ConsumerWidget {
             message: 'Nothing matched "$query". Try a different search.',
           );
         }
+        final availableStores = list.items.map((p) => p.store).toSet().toList()
+          ..sort();
+        final storeFiltered = selectedStores.value == null
+            ? list.items
+            : list.items
+                  .where((p) => selectedStores.value!.contains(p.store))
+                  .toList();
         final items =
             (minScore == 0
-                    ? list.items
-                    : list.items.where((p) => p.score > minScore).toList())
+                    ? storeFiltered
+                    : storeFiltered.where((p) => p.score > minScore).toList())
                 .where(
                   (p) =>
                       p.priceHuf >= priceRange.start &&
@@ -285,14 +295,28 @@ class Products extends ConsumerWidget {
                 )
                 .toList()
               ..sort((a, b) => a.priceHuf > b.priceHuf ? -1 : 1);
-        return isCompactLayout(context)
-            ? _ResultsList(list: list, items: items, minScore: minScore)
-            : _ResultsTable(
-                list: list,
-                items: items,
-                minScore: minScore,
-                priceRange: priceRange,
-              );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _StoreFilterButton(
+                available: availableStores,
+                selected: selectedStores,
+              ),
+            ),
+            Expanded(
+              child: isCompactLayout(context)
+                  ? _ResultsList(list: list, items: items, minScore: minScore)
+                  : _ResultsTable(
+                      list: list,
+                      items: items,
+                      minScore: minScore,
+                      priceRange: priceRange,
+                    ),
+            ),
+          ],
+        );
       },
       error: (error, _) => _CenteredState(
         icon: FluentIcons.error_badge,
@@ -531,6 +555,112 @@ class _ResultsTable extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Quick filter button: pick which stores' results stay visible.
+/// `selected.value == null` means no filter is applied (every store shown).
+class _StoreFilterButton extends StatelessWidget {
+  const _StoreFilterButton({required this.available, required this.selected});
+
+  final List<String> available;
+  final ValueNotifier<Set<String>?> selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<Set<String>?>(
+      valueListenable: selected,
+      builder: (context, value, _) {
+        return DropDownButton(
+          leading: const Icon(FluentIcons.filter, size: 14),
+          title: Text(
+            value == null
+                ? 'Stores: All'
+                : 'Stores: ${value.length}/${available.length}',
+          ),
+          items: [
+            MenuFlyoutItemBuilder(
+              builder: (context) =>
+                  _StoreChecklist(available: available, selected: selected),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// The flyout's content. It listens to [selected] directly (rather than
+/// relying on the opener rebuilding) because a fluent_ui flyout is pushed
+/// as its own route — it won't otherwise pick up state changes made while
+/// it's open, which would make checkbox taps look like they do nothing.
+class _StoreChecklist extends StatelessWidget {
+  const _StoreChecklist({required this.available, required this.selected});
+
+  final List<String> available;
+  final ValueNotifier<Set<String>?> selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    return ValueListenableBuilder<Set<String>?>(
+      valueListenable: selected,
+      builder: (context, value, _) {
+        return SizedBox(
+          width: 220,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Stores', style: theme.typography.bodyStrong),
+                    HyperlinkButton(
+                      onPressed: value == null
+                          ? null
+                          : () => selected.value = null,
+                      child: const Text('Reset'),
+                    ),
+                  ],
+                ),
+              ),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 280),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final store in available)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Checkbox(
+                            checked: value?.contains(store) ?? true,
+                            onChanged: (checked) {
+                              final next = Set<String>.from(
+                                value ?? available,
+                              );
+                              if (checked == true) {
+                                next.add(store);
+                              } else {
+                                next.remove(store);
+                              }
+                              selected.value = next;
+                            },
+                            content: Text(store),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

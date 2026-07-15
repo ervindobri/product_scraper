@@ -16,7 +16,7 @@ class QueriesList {
 class Query {
   final String query;
   final int resultCount;
-  final DateTime lastSearchedDate;
+  final DateTime? lastSearchedDate;
 
   Query({
     required this.query,
@@ -25,10 +25,11 @@ class Query {
   });
 
   factory Query.from(Map<String, dynamic> json) {
+    final rawDate = json['last_searched_date'] as String?;
     return Query(
       query: json['query'] ?? '',
       resultCount: json['results_count'] as int? ?? 0,
-      lastSearchedDate: DateTime.parse(json['last_searched_date'] ?? ''),
+      lastSearchedDate: rawDate == null ? null : DateTime.parse(rawDate),
     );
   }
 }

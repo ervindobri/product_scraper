@@ -21,6 +21,7 @@ Approach per site:
   Webhallen.se   - requests + JSON API (productdiscovery/search endpoint), prices in SEK
   Coolmod.com    - requests + Doofinder JSON search API
   BPM-Power.com  - requests to Doofinder JSON search API (site itself blocked by Cloudflare)
+  OLX.ro/.pl     - requests + server-rendered [data-cy="l-card"] listing cards (classifieds)
 """
 
 import io
@@ -1484,6 +1485,51 @@ def scrape_kleinanzeigen(query: str, session: requests.Session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# OLX.ro / OLX.pl — one platform (OLX Group classifieds), per-country domains
+# ---------------------------------------------------------------------------
+def _scrape_olx_domain(site: str, domain: str, path: str, session: requests.Session, query: str) -> list[dict]:
+    """
+    OLX server-side renders listing cards ([data-cy="l-card"]) — no JSON blob
+    needed, plain requests works fine. When a query has no real match, OLX
+    shows a "didn't find anything, here are similar ads" banner
+    ([data-testid="qa-header-message"]) instead of an empty page; detected
+    and treated as zero results so unrelated fallback ads aren't returned.
+    The search path segment differs per country ("oferte" ro, "oferty" pl).
+    """
+    url = f"https://www.{domain}/{path}/q-{urllib.parse.quote(query)}/"
+    r = session.get(url, timeout=15)
+    _check_response(r, site)
+    soup = BeautifulSoup(r.text, "lxml")
+
+    if soup.select_one('[data-testid="qa-header-message"]'):
+        return []
+
+    results = []
+    for card in soup.select('[data-cy="l-card"]'):
+        name_el = card.select_one('a[data-testid="card-title-link"]')
+        price_el = card.select_one('p[data-testid="ad-price"]')
+        if not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name:
+            continue
+        href = name_el.get("href", "")
+        url_p = f"https://www.{domain}{href}" if href.startswith("/") else href
+        price = _clean(price_el.get_text(" ")) if price_el else "N/A"
+        results.append({"site": site, "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+def scrape_olx_ro(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_olx_domain("OLX.ro", "olx.ro", "oferte", session, query)
+
+
+def scrape_olx_pl(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_olx_domain("OLX.pl", "olx.pl", "oferty", session, query)
+
+
+# ---------------------------------------------------------------------------
 # Registry  — (site_name, region, scrape_fn)
 # ---------------------------------------------------------------------------
 SCRAPERS: list[tuple[str, str, callable]] = [
@@ -1521,6 +1567,7 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Alza.sk",          "sk", scrape_alza_sk),
     # ── Romania ──────────────────────────────────────────────────────────────
     ("eMAG.ro",          "ro", scrape_emag_ro),
+    ("OLX.ro",           "ro", scrape_olx_ro),
     # ── France ───────────────────────────────────────────────────────────────
     ("Alternate.fr",     "fr", scrape_alternate_fr),
     ("LDLC.com",         "fr", scrape_ldlc),
@@ -1540,6 +1587,7 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Megekko.nl",       "nl", scrape_megekko),
     # ── Poland ───────────────────────────────────────────────────────────────
     ("Morele.net",       "pl", scrape_morele),
+    ("OLX.pl",           "pl", scrape_olx_pl),
     # ── Sweden ───────────────────────────────────────────────────────────────
     ("Webhallen.se",     "se", scrape_webhallen),
 ]

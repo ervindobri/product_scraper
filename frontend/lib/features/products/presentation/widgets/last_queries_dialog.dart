@@ -63,8 +63,9 @@ class LastQueriesDialog extends ConsumerWidget {
                                   Expanded(
                                     child: Text(
                                       e.lastSearchedDate
-                                          .toLocal()
-                                          .formatReadable,
+                                              ?.toLocal()
+                                              .formatReadable ??
+                                          'Never',
                                     ),
                                   ),
                                 ],
