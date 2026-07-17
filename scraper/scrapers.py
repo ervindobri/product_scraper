@@ -22,9 +22,15 @@ Approach per site:
   Coolmod.com    - requests + Doofinder JSON search API
   BPM-Power.com  - requests to Doofinder JSON search API (site itself blocked by Cloudflare)
   OLX.ro/.pl     - requests + server-rendered [data-cy="l-card"] listing cards (classifieds)
+  Galaxus.de     - Akamai edge + client-side GraphQL only; raises informative error
+  Allegro.pl/.cz/.sk/.hu - official REST API, OAuth client-credentials
+                   (DataDome blocks scraping; needs ALLEGRO_CLIENT_ID/SECRET)
+  Proshop.de     - requests + li.site-productlist-item HTML cards (?s= search)
+  Bol.com        - cloudscraper + HTML cards (price from screen-reader sentence)
 """
 
 import io
+import os
 import re
 import json
 import html
@@ -1110,6 +1116,62 @@ def scrape_mindfactory(query: str, _session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Galaxus.de  (Digitec Galaxus — largest Swiss retailer's German storefront)
+# ---------------------------------------------------------------------------
+def scrape_galaxus(query: str, _session) -> list[dict]:
+    """
+    Galaxus.de returns Akamai Bot Manager 403s for plain requests AND
+    cloudscraper. curl_cffi Chrome impersonation does pass the edge, but the
+    200 it gets back is only a client-rendered Next.js shell (cookie-consent
+    markup; __NEXT_DATA__ holds navigation only) — search results are fetched
+    client-side from /graphql with persisted-query hashes, so no product data
+    is ever server-rendered. Raises an informative error.
+    """
+    raise RuntimeError(
+        "Galaxus.de: Akamai bot protection plus a client-side GraphQL app — "
+        "no server-rendered product data is reachable; visit galaxus.de directly"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Proshop.de  (Danish PC-hardware/electronics retailer, German storefront)
+# ---------------------------------------------------------------------------
+def scrape_proshop(query: str, session: requests.Session) -> list[dict]:
+    """
+    Proshop.de — requests + server-rendered li.site-productlist-item cards.
+    The real search endpoint is the homepage with ?s= (the /Search?SearchTerm=
+    path serves a campaign/promo product list instead of query results).
+    span.site-currency-lg is the current gross price; the "(xx,xx €)" sibling
+    is net/ex-VAT and .presales-price is the pre-discount price — both ignored.
+    """
+    url = f"https://www.proshop.de/?s={urllib.parse.quote_plus(query)}"
+    r = session.get(url, timeout=15)
+    if r.status_code == 404:
+        return []   # Proshop answers no-match searches with a 404 page
+    _check_response(r, "Proshop.de")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for card in soup.select("li.site-productlist-item"):
+        link_el = card.select_one("a.site-product-link[href]")
+        name_el = card.select_one("h2")
+        if not link_el or not name_el:
+            continue
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        href = link_el.get("href", "")
+        url_p = f"https://www.proshop.de{href}" if href.startswith("/") else href
+        price_el = card.select_one(".price-container .site-currency-lg")
+        price = _clean(price_el.get_text()) if price_el else "N/A"
+        results.append({"site": "Proshop.de", "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
 # Coolblue  (NL/DE/BE electronics retailer)
 # ---------------------------------------------------------------------------
 def _coolblue_from_itemlist(soup: BeautifulSoup, site: str = "Coolblue") -> list[dict]:
@@ -1347,6 +1409,60 @@ def scrape_marktplaats(query: str, session: requests.Session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Bol.com  (largest Dutch general retailer + marketplace)
+# ---------------------------------------------------------------------------
+# Every result card carries an accessibility sentence with the exact price,
+# e.g. "De prijs van dit product is '879' euro en '99' cent" — far more
+# reliable than the display price, which is split across digit spans.
+_BOL_PRICE_RE = re.compile(r"prijs van dit product is '([\d.]+)' euro(?: en '(\d+)' cent)?")
+
+
+def scrape_bol(query: str, _session) -> list[dict]:
+    """
+    Bol.com — cloudscraper (plain requests gets 403; even cloudscraper is
+    sometimes rate-limited to a 403 after several quick searches) +
+    server-rendered cards. A card has no stable class names (utility-class
+    soup), so each product-title link (the /nl/nl/p/ anchor holding an h2) is
+    the entry point and the price is found by walking up its ancestors until
+    the screen-reader price sentence appears — stopping before any container
+    that holds more than one product, so a neighbour's price is never picked.
+    """
+    cs = get_cloudscraper()
+    url = f"https://www.bol.com/nl/nl/s/?searchtext={urllib.parse.quote_plus(query)}"
+    r = cs.get(url, timeout=20)
+    _check_response(r, "Bol.com")
+    soup = BeautifulSoup(r.text, "lxml")
+
+    results = []
+    seen: set[str] = set()
+    for link_el in soup.select('a[href^="/nl/nl/p/"]'):
+        name_el = link_el.select_one("h2")
+        if not name_el:
+            continue  # image/brand links to the same product carry no h2
+        name = _clean(name_el.get_text())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        href = link_el.get("href", "")
+        url_p = f"https://www.bol.com{href}" if href.startswith("/") else href
+
+        price = "N/A"
+        node = link_el
+        for _ in range(8):
+            node = node.parent
+            if node is None or len(node.select('a[href^="/nl/nl/p/"] h2')) > 1:
+                break  # reached a container of several cards
+            m = _BOL_PRICE_RE.search(node.get_text(" ", strip=True))
+            if m:
+                price = f"{m.group(1)},{m.group(2) or '00'} €"
+                break
+
+        results.append({"site": "Bol.com", "name": name, "price": price, "url": url_p})
+
+    return results[:20]
+
+
+# ---------------------------------------------------------------------------
 # Azerty.nl
 # ---------------------------------------------------------------------------
 def scrape_azerty(query: str, _session) -> list[dict]:
@@ -1530,6 +1646,147 @@ def scrape_olx_pl(query: str, session: requests.Session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Allegro.pl / .cz / .sk / .hu — one platform (Polish marketplace), per-country
+# domains, served through the OFFICIAL REST API.
+#
+# Direct scraping is impossible: every route on every domain — homepage,
+# /listing, everything except robots.txt — returns a DataDome 403 challenge
+# (geo.captcha-delivery) for plain requests, cloudscraper, AND curl_cffi
+# Chrome/Safari/Firefox impersonation alike. The REST API is free instead:
+# register an application at https://apps.developer.allegro.pl (any Allegro
+# account works) and set ALLEGRO_CLIENT_ID / ALLEGRO_CLIENT_SECRET (locally in
+# the shell; on the NAS in product-scraper.env). GET /offers/listing is a
+# public-data resource — a client-credentials token suffices, no user login —
+# and one endpoint serves all four marketplaces via the marketplaceId param.
+# ---------------------------------------------------------------------------
+_ALLEGRO_TOKEN_URL = "https://allegro.pl/auth/oauth/token"
+_ALLEGRO_LISTING_URL = "https://api.allegro.pl/offers/listing"
+
+# localized offer-page path per domain: https://allegro.<tld>/<path>/<offer-id>
+# (the bare numeric id redirects to the full slugged URL)
+_ALLEGRO_OFFER_PATHS = {
+    "allegro.pl": "oferta",
+    "allegro.cz": "nabidka",
+    "allegro.sk": "ponuka",
+    "allegro.hu": "ajanlat",
+}
+
+_allegro_token: list = []   # holds at most one (token, expires_at) tuple
+_allegro_token_lock = threading.Lock()
+
+
+def _get_allegro_token(client_id: str, client_secret: str, session) -> str:
+    """Client-credentials token, cached until ~60 s before expiry (~12 h)."""
+    now = time.monotonic()
+    with _allegro_token_lock:
+        if _allegro_token and now < _allegro_token[0][1]:
+            return _allegro_token[0][0]
+        r = session.post(
+            _ALLEGRO_TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(client_id, client_secret),
+            timeout=15,
+        )
+        if r.status_code in (400, 401, 403):
+            raise RuntimeError(
+                f"Allegro token request rejected ({r.status_code}) — check "
+                "ALLEGRO_CLIENT_ID / ALLEGRO_CLIENT_SECRET"
+            )
+        r.raise_for_status()
+        payload = r.json()
+        token = payload["access_token"]
+        expires_at = now + float(payload.get("expires_in", 43200)) - 60
+        _allegro_token[:] = [(token, expires_at)]
+        return token
+
+
+def _scrape_allegro_domain(site: str, domain: str, marketplace_id: str,
+                           query: str, session) -> list[dict]:
+    client_id = os.environ.get("ALLEGRO_CLIENT_ID", "")
+    client_secret = os.environ.get("ALLEGRO_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        raise RuntimeError(
+            f"{site}: DataDome blocks scraping; set ALLEGRO_CLIENT_ID and "
+            "ALLEGRO_CLIENT_SECRET to use the official API "
+            "(free app registration at apps.developer.allegro.pl)"
+        )
+
+    token = _get_allegro_token(client_id, client_secret, session)
+    r = session.get(
+        _ALLEGRO_LISTING_URL,
+        params={"phrase": query, "marketplaceId": marketplace_id, "limit": 20},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.allegro.public.v1+json",
+        },
+        timeout=15,
+    )
+    if r.status_code == 401:
+        # token revoked before its stated expiry — drop the cache so the
+        # next search re-authenticates instead of failing forever
+        with _allegro_token_lock:
+            _allegro_token.clear()
+        raise RuntimeError(f"{site}: Allegro API token rejected — retry the search")
+    _check_response(r, site)
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError(f"{site}: unexpected non-JSON response from Allegro API")
+
+    items = data.get("items") or {}
+    offers = (items.get("promoted") or []) + (items.get("regular") or [])
+
+    results = []
+    seen: set[str] = set()
+    offer_path = _ALLEGRO_OFFER_PATHS[domain]
+    for o in offers:
+        name = _clean(o.get("name") or "")
+        offer_id = o.get("id")
+        if not name or not offer_id or name in seen:
+            continue
+        seen.add(name)
+
+        price_info = (o.get("sellingMode") or {}).get("price") or {}
+        amount = price_info.get("amount")
+        currency = (price_info.get("currency") or "").upper()
+        price = "N/A"
+        if amount is not None:
+            try:
+                val = float(amount)
+                if currency == "HUF":
+                    price = f"{int(round(val)):,} Ft".replace(",", " ")
+                else:
+                    # PLN / CZK stay native (enrich_result knows the region
+                    # currency); EUR (.sk) is converted by convert_eur_price()
+                    price = f"{val:.2f} {currency or 'EUR'}"
+            except (TypeError, ValueError):
+                pass
+
+        results.append({
+            "site": site, "name": name, "price": price,
+            "url": f"https://{domain}/{offer_path}/{offer_id}",
+        })
+
+    return results[:20]
+
+
+def scrape_allegro_pl(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_allegro_domain("Allegro.pl", "allegro.pl", "allegro-pl", query, session)
+
+
+def scrape_allegro_cz(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_allegro_domain("Allegro.cz", "allegro.cz", "allegro-cz", query, session)
+
+
+def scrape_allegro_sk(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_allegro_domain("Allegro.sk", "allegro.sk", "allegro-sk", query, session)
+
+
+def scrape_allegro_hu(query: str, session: requests.Session) -> list[dict]:
+    return _scrape_allegro_domain("Allegro.hu", "allegro.hu", "allegro-hu", query, session)
+
+
+# ---------------------------------------------------------------------------
 # Registry  — (site_name, region, scrape_fn)
 # ---------------------------------------------------------------------------
 SCRAPERS: list[tuple[str, str, callable]] = [
@@ -1549,6 +1806,7 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("almapiac.com",     "hu", scrape_almapiac),
     ("Furbify.hu",       "hu", scrape_furbify),
     ("iKing.hu",         "hu", scrape_iking),
+    ("Allegro.hu",       "hu", scrape_allegro_hu),
     # ── Germany / DACH ───────────────────────────────────────────────────────
     ("Alza.de",          "de", scrape_alza_de),
     ("Alternate.de",     "de", scrape_alternate_de),
@@ -1557,14 +1815,18 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Geizhals.at",      "de", scrape_geizhals),
     ("Coolblue.de",      "de", scrape_coolblue_de),
     ("Notebooksbilliger.de", "de", scrape_notebooksbilliger),
+    ("Galaxus.de",       "de", scrape_galaxus),
+    ("Proshop.de",       "de", scrape_proshop),
     # ("Kleinanzeigen.de", "de", scrape_kleinanzeigen),
     # ── Austria ──────────────────────────────────────────────────────────────
     ("Alza.at",          "at", scrape_alza_at),
     ("Alternate.at",     "at", scrape_alternate_at),
     # ── Czechia ──────────────────────────────────────────────────────────────
     ("Alza.cz",          "cz", scrape_alza_cz),
+    ("Allegro.cz",       "cz", scrape_allegro_cz),
     # ── Slovakia ─────────────────────────────────────────────────────────────
     ("Alza.sk",          "sk", scrape_alza_sk),
+    ("Allegro.sk",       "sk", scrape_allegro_sk),
     # ── Romania ──────────────────────────────────────────────────────────────
     ("eMAG.ro",          "ro", scrape_emag_ro),
     ("OLX.ro",           "ro", scrape_olx_ro),
@@ -1583,11 +1845,13 @@ SCRAPERS: list[tuple[str, str, callable]] = [
     ("Alternate.nl",     "nl", scrape_alternate_nl),
     ("Marktplaats.nl",   "nl", scrape_marktplaats),
     ("Coolblue.nl",      "nl", scrape_coolblue),
+    ("Bol.com",          "nl", scrape_bol),
     ("Azerty.nl",        "nl", scrape_azerty),
     ("Megekko.nl",       "nl", scrape_megekko),
     # ── Poland ───────────────────────────────────────────────────────────────
     ("Morele.net",       "pl", scrape_morele),
     ("OLX.pl",           "pl", scrape_olx_pl),
+    ("Allegro.pl",       "pl", scrape_allegro_pl),
     # ── Sweden ───────────────────────────────────────────────────────────────
     ("Webhallen.se",     "se", scrape_webhallen),
 ]

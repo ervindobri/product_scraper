@@ -620,6 +620,10 @@ class _StoreChecklist extends StatelessWidget {
                   children: [
                     Text('Stores', style: theme.typography.bodyStrong),
                     HyperlinkButton(
+                      onPressed: () => selected.value = {},
+                      child: const Text('Unselect all'),
+                    ),
+                    HyperlinkButton(
                       onPressed: value == null
                           ? null
                           : () => selected.value = null,
@@ -633,24 +637,28 @@ class _StoreChecklist extends StatelessWidget {
                 child: SingleChildScrollView(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    spacing: 4,
                     children: [
                       for (final store in available)
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Checkbox(
-                            checked: value?.contains(store) ?? true,
-                            onChanged: (checked) {
-                              final next = Set<String>.from(
-                                value ?? available,
-                              );
-                              if (checked == true) {
-                                next.add(store);
-                              } else {
-                                next.remove(store);
-                              }
-                              selected.value = next;
-                            },
-                            content: Text(store),
+                          child: SizedBox(
+                            height: 24,
+                            child: Checkbox(
+                              checked: value?.contains(store) ?? true,
+                              onChanged: (checked) {
+                                final next = Set<String>.from(
+                                  value ?? available,
+                                );
+                                if (checked == true) {
+                                  next.add(store);
+                                } else {
+                                  next.remove(store);
+                                }
+                                selected.value = next;
+                              },
+                              content: Text(store),
+                            ),
                           ),
                         ),
                     ],

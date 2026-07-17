@@ -10,7 +10,7 @@ const _apiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
   // on web the app is served from the same host as the API, so a relative
   // URL works everywhere the frontend is deployed
-  defaultValue: kIsWeb ? '/api/' : 'http://127.0.0.1:8000/api/',
+  defaultValue: kIsWeb && !kDebugMode ? '/api/' : 'http://127.0.0.1:8000/api/',
 );
 
 @riverpod
